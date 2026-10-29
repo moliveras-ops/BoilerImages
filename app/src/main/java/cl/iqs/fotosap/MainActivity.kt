@@ -92,6 +92,42 @@ class MainActivity : AppCompatActivity() {
     private var dictadoDestino: EditText? = null
     private var dictadoNumero = false
     private val prefs by lazy { getSharedPreferences("fotosap", Context.MODE_PRIVATE) }
+
+    // Permiso de cámara: la app lo declara (por la medición con RA), así que Android lo exige
+    // también para abrir la app de cámara.
+    private var trasPermiso: Pair<() -> Unit, () -> Unit>? = null
+    private val pedirCamara = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        val f = trasPermiso; trasPermiso = null
+        if (ok) f?.first?.invoke()
+        else { f?.second?.invoke(); aviso("La app necesita permiso de cámara para tomar fotos") }
+    }
+
+    private fun conCamara(siNo: () -> Unit = {}, f: () -> Unit) {
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) f()
+        else { trasPermiso = f to siNo; pedirCamara.launch(android.Manifest.permission.CAMERA) }
+    }
+
+    // Medición con realidad aumentada: el destino se guarda en prefs ("pendRA") por si Android
+    // cierra la app mientras está abierta la pantalla de RA.
+    private val medirRA = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val d = prefs.getString("pendRA", null)?.let { runCatching { JSONObject(it) }.getOrNull() }
+        prefs.edit().remove("pendRA").apply()
+        if (d == null) return@registerForActivityResult
+        if (d.optString("origen") == "terreno") enTerreno = true
+        else if (d.optInt("ti") >= 0) { enEvento = true; tipoActual = d.optInt("ti"); paredActual = d.optInt("pi") }
+        if (res.resultCode != RESULT_OK || res.data == null) { render(); return@registerForActivityResult }
+        val nombre = res.data!!.getStringExtra("nombre") ?: return@registerForActivityResult
+        val resumen = res.data!!.getStringExtra("resumen") ?: ""
+        val m = JSONObject(d.toString()).put("anotada", nombre).put("tipo", "ra")
+            .put("resumen", resumen).put("modo", res.data!!.getStringExtra("modo") ?: "")
+            .put("fecha", System.currentTimeMillis()).put("puntos", JSONArray())
+        escribirTexto(d.optString("ruta"), "${d.optString("base")}.txt",
+            "${d.optString("titulo")}\nMedición con realidad aumentada · ${m.optString("modo")}\n" +
+            "Fecha: ${fmtFecha.format(Date())} ${fmtHora.format(Date())}\nFoto: $nombre\n\n${resumen.replace(" · ", "\n")}")
+        guardarMediciones(mediciones() + m)
+        render()
+        verMedicion(m)
+    }
     private var tipos = mutableListOf<Tipo>()
     private var enEvento = false
     private var enTerreno = false
@@ -623,6 +659,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(boton("🔍  Detalles (ráfaga)") { dlg.dismiss(); tomarFoto(ti, pi, n, "detalle") })
         col.addView(boton("📝  Nota (escribir o dictar)") { dlg.dismiss(); editarNota(ti, pi, n) })
         col.addView(boton("📍  Foto con puntos de espesor") { dlg.dismiss(); medicionSingularidad(ti, pi, n) })
+        col.addView(boton("📐  Medir con realidad aumentada") { dlg.dismiss(); medirRASingularidad(ti, pi, n) })
         col.addView(texto("Ráfaga: la cámara se vuelve a abrir después de cada foto. " +
                           "Presiona Atrás en la cámara para terminar.", 12f))
         dlg.show()
@@ -1175,6 +1212,9 @@ class MainActivity : AppCompatActivity() {
         col.addView(boton("📍  Nueva medición de espesores", Estilo.PRIMARIO) { medicionTerreno() }.apply {
             minHeight = dp(76); textSize = 17f
         })
+        col.addView(boton("📐  Medir con realidad aumentada\nParche · distancia a referencia · tramo de tubo") { medirRATerreno() }.apply {
+            minHeight = dp(72)
+        })
         col.addView(texto("1. Foto de la zona   2. Toca cada punto medido   3. Valor con foto del medidor, " +
                           "escrito o dictado   4. Guardar: queda la foto con el espesor en cada punto.", 12f))
         col.addView(espacio(8))
@@ -1423,11 +1463,13 @@ class MainActivity : AppCompatActivity() {
     private fun lanzarCamara(uri: Uri, modo: String) {
         prefs.edit().putString("pendUri", uri.toString()).putString("pendModo", modo)
             .putInt("pendTipo", -1).putInt("pendPared", -1).putInt("pendNum", -1).apply()
-        try { camara.launch(uri) }
-        catch (e: Exception) {
+        val fallar = {
             runCatching { contentResolver.delete(uri, null, null) }
-            aviso("No se encontró app de cámara")
             if (modo == "medBase") { val s = sesionMed(); guardarSesionMed(null); volverDeMedicion(s) }
+        }
+        conCamara(siNo = { fallar() }) {
+            try { camara.launch(uri) }
+            catch (e: Exception) { fallar(); aviso("No se encontró app de cámara") }
         }
     }
 
@@ -1437,6 +1479,29 @@ class MainActivity : AppCompatActivity() {
         while ("Medicion_%02d".format(k) in usados) k++
         iniciarMedicion("terreno", carpetaTerreno, carpetaTerreno + "Originales/",
             "Medicion_%02d".format(k), "$evento — Medición %02d".format(k))
+    }
+
+    private fun medirConRA(origen: String, ruta: String, base: String, titulo: String, ti: Int = -1, pi: Int = -1, n: Int = -1) {
+        val d = JSONObject().put("origen", origen).put("ruta", ruta).put("extra", ruta).put("base", base)
+            .put("titulo", titulo).put("ti", ti).put("pi", pi).put("n", n)
+        prefs.edit().putString("pendRA", d.toString()).apply()
+        medirRA.launch(Intent(this, MedirRAActivity::class.java)
+            .putExtra("ruta", ruta).putExtra("nombre", "$base.jpg").putExtra("titulo", titulo))
+    }
+
+    private fun medirRATerreno() {
+        val usados = mediciones().map { it.optString("base") }.toSet()
+        var k = libre(carpetaTerreno, "RA_%02d.jpg")
+        while ("RA_%02d".format(k) in usados) k++
+        medirConRA("terreno", carpetaTerreno, "RA_%02d".format(k), "$evento — Medición RA %02d".format(k))
+    }
+
+    private fun medirRASingularidad(ti: Int, pi: Int, n: Int) {
+        val t = tipos[ti]; val p = t.paredes[pi]
+        val ruta = carpeta(t, p, n)
+        val pre = "%s%02d_RA_".format(t.prefijo, n)
+        val k = libre(ruta, "$pre%d.jpg")
+        medirConRA("sing", ruta, "$pre$k", "$evento — %s %02d — %s".format(t.prefijo, n, p.nombre), ti, pi, n)
     }
 
     private fun medicionSingularidad(ti: Int, pi: Int, n: Int) {
@@ -1551,30 +1616,38 @@ class MainActivity : AppCompatActivity() {
         col.addView(etNota)
         col.addView(boton("🎤  Dictar nota") { dictar(etNota, false) })
 
+        // Acciones como botones grandes dentro de la ventana (no se cortan y sirven con guantes)
         val dlg = AlertDialog.Builder(this)
             .setTitle("Punto $etiqueta")
             .setView(scroll(col))
             .setCancelable(false)
-            .setPositiveButton(if (existente == null) "Agregar punto" else "Guardar") { _, _ ->
-                val s2 = sesionMed() ?: return@setPositiveButton
-                val l = puntosDe(s2)
-                val v = etValor.text.toString().trim().replace(',', '.')
-                val nt = etNota.text.toString().trim()
-                if (existente != null && indice in l.indices) { l[indice].valor = v; l[indice].nota = nt }
-                else l.add(Punto(s2.optDouble("px").toFloat(), s2.optDouble("py").toFloat(), v, nt,
-                                 uriMedidor?.toString() ?: "", s2.optInt("pnum")))
-                ponerPuntos(s2, l); guardarSesionMed(s2); render()
-                if (v.isBlank()) aviso("Punto agregado sin valor: tócalo para completarlo")
-            }
-            .setNegativeButton(if (existente == null) "Descartar" else "Cancelar") { _, _ ->
-                if (existente == null) uriMedidor?.let { runCatching { contentResolver.delete(it, null, null) } }
-            }
             .setOnDismissListener { notaEditando = null }
-        if (existente == null) dlg.setNeutralButton(if (uriMedidor != null) "Repetir foto" else "📷 Foto") { _, _ ->
+            .create()
+        col.addView(espacio(6))
+        col.addView(boton(if (existente == null) "✓  Agregar punto" else "✓  Guardar", Estilo.ACENTO) {
+            dlg.dismiss()
+            val s2 = sesionMed() ?: return@boton
+            val l = puntosDe(s2)
+            val v = etValor.text.toString().trim().replace(',', '.')
+            val nt = etNota.text.toString().trim()
+            if (existente != null && indice in l.indices) { l[indice].valor = v; l[indice].nota = nt }
+            else l.add(Punto(s2.optDouble("px").toFloat(), s2.optDouble("py").toFloat(), v, nt,
+                             uriMedidor?.toString() ?: "", s2.optInt("pnum")))
+            ponerPuntos(s2, l); guardarSesionMed(s2); render()
+            if (v.isBlank()) aviso("Punto agregado sin valor: tócalo para completarlo")
+        }.apply { minHeight = dp(68); textSize = 18f })
+        val fila2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        if (existente == null) fila2.addView(boton(if (uriMedidor != null) "📷  Repetir foto" else "📷  Foto") {
+            dlg.dismiss()
             uriMedidor?.let { runCatching { contentResolver.delete(it, null, null) } }
             fotoMedidor()
-        }
-        mostrar(dlg.create())
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) } })
+        fila2.addView(boton(if (existente == null) "✕  Descartar" else "✕  Cancelar", Estilo.PELIGRO) {
+            dlg.dismiss()
+            if (existente == null) uriMedidor?.let { runCatching { contentResolver.delete(it, null, null) } }
+        }.apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) })
+        col.addView(fila2)
+        dlg.show()
     }
 
     private fun menuPunto(i: Int) {
@@ -1953,7 +2026,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun uriAnotada(m: JSONObject) = buscarArchivo(m.optString("ruta"), m.optString("anotada"))
 
-    private fun nombreMedicion(m: JSONObject) = m.optString("base").replace('_', ' ').replace("Medicion", "Medición")
+    private fun esRA(m: JSONObject) = m.optString("tipo") == "ra"
+
+    private fun nombreMedicion(m: JSONObject) =
+        if (esRA(m)) "Medición RA " + m.optString("base").substringAfterLast('_')
+        else m.optString("base").replace('_', ' ').replace("Medicion", "Medición")
 
     /** Muestra la foto con los espesores (con opción de compartir). */
     private fun verMedicion(m: JSONObject) {
@@ -1968,7 +2045,7 @@ class MainActivity : AppCompatActivity() {
             .setView(scroll(iv))
             .setPositiveButton("Cerrar", null)
             .setNeutralButton("Compartir") { _, _ -> compartir(uri) }
-        if (m.optString("origen") == "terreno") dlg.setNegativeButton("Editar puntos") { _, _ -> editarMedicion(m) }
+        if (m.optString("origen") == "terreno" && !esRA(m)) dlg.setNegativeButton("Editar puntos") { _, _ -> editarMedicion(m) }
         dlg.show()
     }
 
@@ -1980,10 +2057,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun menuMedicion(m: JSONObject) {
-        menuGrande(nombreMedicion(m), listOf(
-            "🖼  Ver foto con espesores" to { verMedicion(m) },
-            "✏️  Editar puntos" to { editarMedicion(m) },
-            "🗑  Eliminar medición" to { confirmar("¿Eliminar ${nombreMedicion(m)}, su foto y sus lecturas?") { eliminarMedicion(m) } }))
+        val opciones = mutableListOf<Pair<String, () -> Unit>>("🖼  Ver foto" to { verMedicion(m) })
+        if (!esRA(m)) opciones.add("✏️  Editar puntos" to { editarMedicion(m) })
+        opciones.add("🗑  Eliminar medición" to { confirmar("¿Eliminar ${nombreMedicion(m)} y su foto?") { eliminarMedicion(m) } })
+        menuGrande(nombreMedicion(m), opciones)
     }
 
     private fun editarMedicion(m: JSONObject) {
@@ -2001,7 +2078,8 @@ class MainActivity : AppCompatActivity() {
         borrarUri(m.optString("foto"))
         val puntos = puntosDe(m)
         puntos.forEach { borrarUri(it.foto) }
-        if (m.optString("origen") == "terreno") {
+        if (esRA(m)) escribirTexto(m.optString("ruta"), "${m.optString("base")}.txt", "")
+        else if (m.optString("origen") == "terreno") {
             val nums = puntos.map { it.num }.toSet()
             nums.forEach { escribirTexto(carpetaTerreno, "Registro_%02d.txt".format(it), "") }
             guardarRegistros(registros().filter { it.num !in nums })
@@ -2037,7 +2115,9 @@ class MainActivity : AppCompatActivity() {
         val puntos = puntosDe(m)
         val f = Date(m.optLong("fecha"))
         val valores = puntos.mapIndexed { i, p -> "P${i + 1} ${textoValor(p.valor)}" }.joinToString(" · ")
-        fila.addView(texto("${nombreMedicion(m)} · ${puntos.size} punto(s)\n${fmtFecha.format(f)} ${fmtHora.format(f)}\n$valores", 13f)
+        val encabezado = if (esRA(m)) "${nombreMedicion(m)} · ${m.optString("modo")}" else "${nombreMedicion(m)} · ${puntos.size} punto(s)"
+        val detalle = if (esRA(m)) m.optString("resumen").replace("\n", " · ") else valores
+        fila.addView(texto("$encabezado\n${fmtFecha.format(f)} ${fmtHora.format(f)}\n$detalle", 13f)
             .apply {
                 setTextColor(C.tinta)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -2115,11 +2195,13 @@ class MainActivity : AppCompatActivity() {
             .putInt("pendPared", pi)
             .putInt("pendNum", n)
             .apply()
-        try {
-            camara.launch(uri)
-        } catch (e: Exception) {
-            contentResolver.delete(uri, null, null)
-            aviso("No se encontró app de cámara")
+        conCamara(siNo = { runCatching { contentResolver.delete(uri, null, null) } }) {
+            try {
+                camara.launch(uri)
+            } catch (e: Exception) {
+                contentResolver.delete(uri, null, null)
+                aviso("No se encontró app de cámara")
+            }
         }
     }
 
@@ -2250,7 +2332,7 @@ class MainActivity : AppCompatActivity() {
         "✋" to R.drawable.ic_mover, "🗑" to R.drawable.ic_borrar, "🖼" to R.drawable.ic_imagen,
         "⌨️" to R.drawable.ic_teclado, "⌨" to R.drawable.ic_teclado, "←" to R.drawable.ic_volver,
         "＋" to R.drawable.ic_agregar, "✕" to R.drawable.ic_cerrar, "✓" to R.drawable.ic_listo,
-        "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento)
+        "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento, "📐" to R.drawable.ic_regla)
 
     /** Separa un emoji inicial del texto: (ícono, texto limpio). */
     private fun separarIcono(s: String): Pair<Int?, String> {

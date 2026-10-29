@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Medición con realidad aumentada (opcional: la app funciona sin ARCore) -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.ar" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
     <!-- Para que Android 11+ permita abrir la app de cámara -->
     <queries>
         <intent>
@@ -18,6 +23,12 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:label="BoilerImage"
         android:theme="@style/Theme.BoilerImage">
+        <meta-data android:name="com.google.ar.core" android:value="optional" />
+        <activity
+            android:name=".MedirRAActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
