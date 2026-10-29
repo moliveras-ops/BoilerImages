@@ -2043,9 +2043,9 @@ class MainActivity : AppCompatActivity() {
                     runCatching { contentResolver.delete(uriZip, null, null) }
                     throw e
                 }
-                val tam = contentResolver.query(uriZip, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null)
-                    ?.use { if (it.moveToFirst()) it.getLong(0) else 0L } ?: 0L
-                Triple(uriZip, nombreZip, "${lista.size} archivos · ${"%.1f".format(tam / 1048576.0)} MB")
+                val tam = runCatching { contentResolver.openFileDescriptor(uriZip, "r")?.use { it.statSize } }.getOrNull() ?: 0L
+                val txtTam = if (tam >= 1048576) "%.1f MB".format(tam / 1048576.0) else "${maxOf(1, tam / 1024)} KB"
+                Triple(uriZip, nombreZip, "${lista.size} archivos · $txtTam")
             }
             runOnUiThread {
                 runCatching { espera.dismiss() }
