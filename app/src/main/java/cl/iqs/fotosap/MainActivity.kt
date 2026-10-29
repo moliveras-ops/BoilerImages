@@ -156,7 +156,7 @@ class MainActivity : AppCompatActivity() {
             uri?.let { runCatching { contentResolver.delete(it, null, null) } }
         } else if (modo == "detalle" && ti >= 0 && pi >= 0 && n > 0) {
             // Modo ráfaga: vuelve a abrir la cámara hasta que el usuario cancele
-            tomarFoto(ti, pi, n, "detalle")
+            tomarFotoSistema(ti, pi, n, "detalle")
             return@registerForActivityResult
         }
         if (ti >= 0) { enEvento = true; tipoActual = ti; paredActual = pi }
@@ -382,6 +382,12 @@ class MainActivity : AppCompatActivity() {
             enCalderas = true; plantaActual = null; render()
         })
         col.addView(boton("💾  Respaldo y restauración") { menuRespaldo() })
+        col.addView(boton(if (camaraPropia()) "📷  Cámara: BoilerImage\nLinterna, lentes, volumen y ráfaga · tocar para usar la del teléfono"
+                          else "📷  Cámara: la del teléfono\nTocar para usar la cámara BoilerImage") {
+            prefs.edit().putBoolean("camaraPropia", !camaraPropia()).apply()
+            aviso(if (camaraPropia()) "Se usará la cámara BoilerImage" else "Se usará la cámara del teléfono")
+            render()
+        })
         col.addView(espacio(20))
         col.addView(texto("Carpeta en el teléfono:\nAlmacenamiento interno > $raiz", 13f))
         setContentView(scroll(col))
@@ -663,7 +669,9 @@ class MainActivity : AppCompatActivity() {
         col.addView(boton("📝  Nota (escribir o dictar)") { dlg.dismiss(); editarNota(ti, pi, n) })
         col.addView(boton("📍  Foto con puntos de espesor") { dlg.dismiss(); medicionSingularidad(ti, pi, n) })
         col.addView(boton("📐  Medir con realidad aumentada") { dlg.dismiss(); medirRASingularidad(ti, pi, n) })
-        col.addView(texto("Ráfaga: la cámara se vuelve a abrir después de cada foto. " +
+        col.addView(texto(if (camaraPropia()) "Cámara BoilerImage: toma varias fotos seguidas, cambia General/Detalle " +
+                          "y salta a la siguiente singularidad sin salir. Las teclas de volumen disparan."
+                          else "Ráfaga: la cámara se vuelve a abrir después de cada foto. " +
                           "Presiona Atrás en la cámara para terminar.", 12f))
         // Saltar a la singularidad anterior / siguiente (pasa a la pared vecina en los extremos)
         val nav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -1698,6 +1706,14 @@ class MainActivity : AppCompatActivity() {
     /** Guarda la configuración del evento actual como caldera de una planta. */
     private fun guardarComoPlantilla() {
         val previo = prefs.getString("caldera_$evento", null)
+        mostrar(AlertDialog.Builder(this).setTitle("Guardar como plantilla de caldera")
+            .setMessage("Guarda los tipos de singularidad, sus paredes y cantidades de este evento para " +
+                        "precargarlos en los próximos eventos de esa caldera.\n\nNo cambia fotos, notas ni mediciones.")
+            .setPositiveButton("Continuar") { _, _ -> pedirPlantilla(previo) }
+            .setNegativeButton("Cancelar", null).create())
+    }
+
+    private fun pedirPlantilla(previo: String?) {
         dialogoTexto("Planta (ej. Planta Valdivia)", previo?.let { plantaDe(it) } ?: "") { p0 ->
             val pl = limpiar(p0)
             dialogoTexto("Caldera (ej. Caldera Recuperadora)", previo?.let { calderaDe(it) } ?: "") { c0 ->
@@ -1706,7 +1722,7 @@ class MainActivity : AppCompatActivity() {
                     prefs.edit().putString("tpl_$id", aJson(tipos)).putString("caldera_$evento", id).apply()
                     guardarListaPrefs("plantas", plantas() + pl)
                     guardarListaPrefs("calderas", calderas() + id)
-                    aviso("Guardada: $id")
+                    aviso("Plantilla guardada: ${plantaDe(id)} — ${calderaDe(id)}")
                     render()
                 }
                 if (id in calderas()) confirmar("Ya existe \"$id\". ¿Reemplazarla con esta configuración?") { hacer() }
@@ -2956,7 +2972,61 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Cámara / MediaStore ----------
 
+    private fun camaraPropia() = prefs.getBoolean("camaraPropia", true)
+
+    /**
+     * Abre la cámara BoilerImage en la singularidad indicada. Recibe la lista de todas las
+     * singularidades del tipo (todas sus paredes) para poder saltar a la siguiente desde la cámara.
+     */
+    private fun abrirCamaraPropia(ti: Int, pi: Int, n: Int, modo: String) {
+        val t = tipos[ti]
+        val rutas = ArrayList<String>(); val codigos = ArrayList<String>(); val titulos = ArrayList<String>()
+        val paredDe = ArrayList<Int>()
+        var indice = 0
+        t.paredes.forEachIndexed { j, p ->
+            for (k in 1..p.cantidad) {
+                if (j == pi && k == n) indice = rutas.size
+                rutas.add(carpeta(t, p, k)); codigos.add("%s%02d".format(t.prefijo, k))
+                titulos.add("%s%02d · %s".format(t.prefijo, k, p.nombre)); paredDe.add(j)
+            }
+        }
+        prefs.edit().putInt("camTipo", ti).putString("camParedes", paredDe.joinToString(","))
+            .putString("camNums", t.paredes.flatMap { p -> (1..p.cantidad).toList() }.joinToString(","))
+            .putString("camModo", modo).apply()
+        conCamara {
+            camaraBI.launch(Intent(this, CamaraActivity::class.java)
+                .putStringArrayListExtra("rutas", rutas).putStringArrayListExtra("codigos", codigos)
+                .putStringArrayListExtra("titulos", titulos).putExtra("indice", indice).putExtra("modo", modo))
+        }
+    }
+
+    private val camaraBI = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val ti = prefs.getInt("camTipo", -1)
+        val paredes = prefs.getString("camParedes", "")!!.split(',').mapNotNull { it.toIntOrNull() }
+        val nums = prefs.getString("camNums", "")!!.split(',').mapNotNull { it.toIntOrNull() }
+        val modo = prefs.getString("camModo", "general") ?: "general"
+        val i = res.data?.getIntExtra("indice", -1) ?: -1
+        if (ti >= 0) {
+            enEvento = true; tipoActual = ti
+            paredes.getOrNull(i)?.let { paredActual = it }
+        }
+        render()
+        val error = res.data?.getStringExtra("error")
+        if (res.resultCode != RESULT_OK && error != null && ti in tipos.indices) {
+            // La cámara propia no abrió: se usa la del teléfono
+            aviso("No se pudo abrir la cámara BoilerImage ($error). Se usa la del teléfono.")
+            val pi = paredes.getOrNull(i) ?: return@registerForActivityResult
+            val n = nums.getOrNull(i) ?: return@registerForActivityResult
+            tomarFotoSistema(ti, pi, n, modo)
+        }
+    }
+
     private fun tomarFoto(ti: Int, pi: Int, n: Int, modo: String) {
+        if (ti !in tipos.indices || pi !in tipos[ti].paredes.indices) return
+        if (camaraPropia()) abrirCamaraPropia(ti, pi, n, modo) else tomarFotoSistema(ti, pi, n, modo)
+    }
+
+    private fun tomarFotoSistema(ti: Int, pi: Int, n: Int, modo: String) {
         if (ti !in tipos.indices || pi !in tipos[ti].paredes.indices) return
         val t = tipos[ti]
         val p = t.paredes[pi]

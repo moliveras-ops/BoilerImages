@@ -11,8 +11,8 @@ android {
         applicationId = "cl.iqs.fotosap"
         minSdk = 29          // Android 10 o superior
         targetSdk = 34
-        versionCode = 20
-        versionName = "2.9"
+        versionCode = 21
+        versionName = "3.0"
     }
 
     // Clave fija: así cada APK nuevo se instala encima del anterior sin desinstalar
@@ -46,4 +46,11 @@ dependencies {
     implementation("com.google.mlkit:text-recognition:16.0.1")
     // Realidad aumentada para medir distancias y áreas
     implementation("com.google.ar:core:1.44.0")
+    // Cámara propia (linterna, lentes, ráfaga, HDR/Noche si el teléfono lo ofrece)
+    val camerax = "1.4.2"
+    implementation("androidx.camera:camera-core:$camerax")
+    implementation("androidx.camera:camera-camera2:$camerax")
+    implementation("androidx.camera:camera-lifecycle:$camerax")
+    implementation("androidx.camera:camera-view:$camerax")
+    implementation("androidx.camera:camera-extensions:$camerax")
 }
