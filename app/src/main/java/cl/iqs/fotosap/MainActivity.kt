@@ -694,11 +694,11 @@ class MainActivity : AppCompatActivity() {
                 setCompoundDrawablesRelative(null, null, null, null)
                 background = fondoRedondeado(C.primarioSuave, 14)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    setMargins(if (d < 0) 0 else dp(5), dp(8), if (d < 0) dp(5) else 0, 0)
+                    setMargins(if (d < 0) 0 else dp(5), dp(4), if (d < 0) dp(5) else 0, dp(4))
                 }
             })
         }
-        col.addView(nav)
+        col.addView(nav, 2)   // arriba, visible sin desplazar
         dlg.show()
     }
 
@@ -1002,7 +1002,7 @@ class MainActivity : AppCompatActivity() {
         val bmp = runCatching { cargarBitmap(f.uri, 2000) }.getOrNull() ?: run { aviso("No se pudo abrir la foto"); return }
         val dlg = dialogoPantallaCompleta()
         val raizV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.BLACK) }
-        raizV.addView(barraOscura(TextView(this).apply { text = "Marcar ${etiquetaFoto(f.nombre)}\nArrastra para dibujar · toca para texto" }) {
+        raizV.addView(barraOscura(TextView(this).apply { text = "Marcar ${etiquetaFoto(f.nombre)}\nArrastra: dibujar · Toca: texto" }) {
             dlg.dismiss()
         })
         val vista = VistaDibujo(bmp)
