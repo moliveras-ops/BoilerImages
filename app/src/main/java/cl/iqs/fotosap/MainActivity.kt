@@ -562,15 +562,34 @@ class MainActivity : AppCompatActivity() {
 
     private fun menuEvento(nombre: String) {
         AlertDialog.Builder(this).setTitle(nombre)
-            .setItems(arrayOf("Abrir", "Eliminar evento y sus fotos")) { _, w ->
+            .setItems(arrayOf("Abrir", "Eliminar solo las fotos", "Eliminar evento y sus fotos")) { _, w ->
                 when (w) {
                     0 -> abrirEvento(nombre)
-                    1 -> confirmar("¿Eliminar \"$nombre\" y TODAS sus fotos del teléfono?\n\n" +
+                    1 -> confirmar("¿Eliminar solo las FOTOS de \"$nombre\"?\n\n" +
+                                   "Se mantienen el evento, su configuración, las notas, los valores de espesores, " +
+                                   "el Excel y el CSV. Asegúrate de haber copiado las fotos al PC. No se puede deshacer.") {
+                        borrarFotosEvento(nombre)
+                    }
+                    2 -> confirmar("¿Eliminar \"$nombre\" y TODAS sus fotos del teléfono?\n\n" +
                                    "Asegúrate de haberlas copiado al PC. No se puede deshacer.") {
                         borrarEvento(nombre)
                     }
                 }
             }.show()
+    }
+
+    /** Borra solo las imágenes del evento (todas sus carpetas); deja textos, CSV, Excel y la configuración. */
+    private fun borrarFotosEvento(nombre: String) {
+        val sel = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.MIME_TYPE} LIKE ?"
+        val args = arrayOf("$raiz/$nombre/%", "image/%")
+        val borradas = try { contentResolver.delete(coleccion, sel, args) } catch (e: Exception) { 0 }
+        val quedan = runCatching {
+            contentResolver.query(coleccion, arrayOf(MediaStore.MediaColumns._ID), sel, args, null)?.use { it.count } ?: 0
+        }.getOrDefault(0)
+        if (quedan > 0)
+            aviso("Se borraron $borradas fotos. Quedan $quedan que la app no puede borrar: elimínalas desde Mis archivos.")
+        else aviso("Fotos eliminadas ($borradas). El evento y sus notas se mantienen.")
+        render()
     }
 
     private fun borrarEvento(nombre: String) {
