@@ -655,6 +655,11 @@ class MainActivity : AppCompatActivity() {
             .setView(scroll(col))
             .setNegativeButton("Cerrar", null)
             .create()
+        val totalFotos = (info?.first ?: 0) + (info?.second ?: 0)
+        if (totalFotos > 0) col.addView(boton("🖼  Ver fotos capturadas ($totalFotos)", Estilo.PRIMARIO) {
+            dlg.dismiss()
+            galeriaFotos("%s %02d — %s".format(t.prefijo, n, p.nombre), carpeta(t, p, n))
+        })
         col.addView(boton("📷  Foto general") { dlg.dismiss(); tomarFoto(ti, pi, n, "general") })
         col.addView(boton("🔍  Detalles (ráfaga)") { dlg.dismiss(); tomarFoto(ti, pi, n, "detalle") })
         col.addView(boton("📝  Nota (escribir o dictar)") { dlg.dismiss(); editarNota(ti, pi, n) })
@@ -663,6 +668,266 @@ class MainActivity : AppCompatActivity() {
         col.addView(texto("Ráfaga: la cámara se vuelve a abrir después de cada foto. " +
                           "Presiona Atrás en la cámara para terminar.", 12f))
         dlg.show()
+    }
+
+    // ---------- Vista previa de fotos ----------
+
+    private class FotoInfo(val uri: Uri, val nombre: String)
+
+    /** Fotos guardadas directamente en la carpeta de la singularidad, ordenadas por tipo y número. */
+    private fun fotosDe(ruta: String): MutableList<FotoInfo> {
+        val l = mutableListOf<FotoInfo>()
+        val sel = "${MediaStore.MediaColumns.RELATIVE_PATH} = ?" + soloImagenes
+        runCatching {
+            contentResolver.query(coleccion, arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME),
+                sel, arrayOf(ruta), null)?.use { c ->
+                while (c.moveToNext())
+                    l.add(FotoInfo(android.content.ContentUris.withAppendedId(coleccion, c.getLong(0)), c.getString(1) ?: ""))
+            }
+        }
+        val orden = listOf("_general", "_detalle", "_espesores", "_RA")
+        fun clase(s: String) = orden.indexOfFirst { s.contains(it) }.let { if (it < 0) orden.size else it }
+        fun num(s: String) = Regex("_(\\d+)\\.").find(s)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        l.sortWith(compareBy({ clase(it.nombre) }, { num(it.nombre) }, { it.nombre }))
+        return l
+    }
+
+    /** "AP01_detalle_2.jpg" → "Detalle 2" */
+    private fun etiquetaFoto(nombre: String): String {
+        val s = nombre.substringBeforeLast('.').substringAfter('_').replace('_', ' ')
+        return s.replaceFirstChar { it.uppercase() }
+    }
+
+    private fun dialogoPantallaCompleta() =
+        android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+
+    private fun barraOscura(titulo: String, cerrar: () -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        setBackgroundColor(C.primario); setPadding(dp(16), dp(6), dp(4), dp(6))
+        addView(TextView(context).apply {
+            text = titulo; textSize = 18f; typeface = medio; setTextColor(Color.WHITE); maxLines = 2
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        addView(botonIcono(R.drawable.ic_cerrar, Color.WHITE) { cerrar() })
+    }
+
+    /** Grilla de miniaturas de las fotos de una singularidad. Tocar una la abre en grande. */
+    private fun galeriaFotos(titulo: String, ruta: String) {
+        val dlg = dialogoPantallaCompleta()
+        val raizV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.oscuro) }
+        raizV.addView(barraOscura(titulo) { dlg.dismiss() })
+        val cont = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(8), dp(8), dp(8), dp(16)) }
+        raizV.addView(ScrollView(this).apply { addView(cont) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        dlg.setContentView(raizV)
+        var cambio = false
+
+        fun llenar() {
+            cont.removeAllViews()
+            val fotos = fotosDe(ruta)
+            if (fotos.isEmpty()) {
+                cont.addView(TextView(this).apply {
+                    text = "Sin fotos"; textSize = 16f; setTextColor(Color.LTGRAY); gravity = Gravity.CENTER
+                    setPadding(0, dp(40), 0, 0)
+                }); return
+            }
+            val grid = GridLayout(this).apply { columnCount = 3 }
+            fotos.forEachIndexed { i, f ->
+                val celda = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = GridLayout.LayoutParams().apply {
+                        width = 0; columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                        setMargins(dp(4), dp(4), dp(4), dp(4))
+                    }
+                }
+                val iv = ImageView(this).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    setBackgroundColor(Color.parseColor("#1C2A3A"))
+                    outlineProvider = object : android.view.ViewOutlineProvider() {
+                        override fun getOutline(v: View, o: android.graphics.Outline) { o.setRoundRect(0, 0, v.width, v.height, dp(10).toFloat()) }
+                    }
+                    clipToOutline = true
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(120))
+                    setOnClickListener {
+                        visorFotos(fotos, i) { cambio = true; llenar() }
+                    }
+                }
+                celda.addView(iv)
+                celda.addView(TextView(this).apply {
+                    text = etiquetaFoto(f.nombre); textSize = 13f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                    setPadding(0, dp(4), 0, dp(2)); maxLines = 1
+                })
+                grid.addView(celda)
+                Thread {
+                    val b = runCatching { contentResolver.loadThumbnail(f.uri, Size(360, 360), null) }.getOrNull()
+                    if (b != null) runOnUiThread { iv.setImageBitmap(b) }
+                }.start()
+            }
+            cont.addView(grid)
+            cont.addView(TextView(this).apply {
+                text = "${fotos.size} foto(s) · toca una para verla en grande"; textSize = 12f
+                setTextColor(Color.LTGRAY); gravity = Gravity.CENTER; setPadding(0, dp(10), 0, 0)
+            })
+        }
+        llenar()
+        dlg.setOnDismissListener { if (cambio) render() }
+        dlg.show()
+    }
+
+    /** Foto en pantalla completa: deslizar o flechas para cambiar, pellizcar o doble toque para zoom. */
+    private fun visorFotos(fotos: MutableList<FotoInfo>, inicio: Int, alBorrar: () -> Unit) {
+        if (fotos.isEmpty()) return
+        var i = inicio.coerceIn(0, fotos.size - 1)
+        val dlg = dialogoPantallaCompleta()
+        val raizV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.BLACK) }
+        val tituloV = TextView(this)
+        val barra = barraOscura("") { dlg.dismiss() }
+        (barra.getChildAt(0) as TextView).let { tituloV.layoutParams = it.layoutParams; barra.removeViewAt(0) }
+        tituloV.apply { textSize = 17f; typeface = medio; setTextColor(Color.WHITE); maxLines = 2 }
+        barra.addView(tituloV, 0)
+        raizV.addView(barra)
+        lateinit var vista: VistaZoom
+        var cargaId = 0
+
+        fun mostrarActual() {
+            val f = fotos[i]
+            tituloV.text = "${etiquetaFoto(f.nombre)}   ${i + 1} / ${fotos.size}\n${f.nombre}"
+            val id = ++cargaId
+            vista.poner(null)
+            Thread {
+                val b = runCatching { cargarBitmap(f.uri, 2400) }.getOrNull()
+                runOnUiThread {
+                    if (id != cargaId) return@runOnUiThread
+                    if (b == null) aviso("No se pudo abrir ${f.nombre}") else vista.poner(b)
+                }
+            }.start()
+        }
+        fun mover(d: Int) {
+            val j = i + d
+            if (j in fotos.indices) { i = j; mostrarActual() }
+        }
+        vista = VistaZoom({ mover(1) }, { mover(-1) })
+        raizV.addView(vista, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val acciones = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            setBackgroundColor(C.oscuro); setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        fun accion(res: Int, txt: String, color: Int = Color.WHITE, f: () -> Unit) = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+            minimumHeight = dp(64)
+            background = fondoRedondeado(Color.parseColor("#1C2A3A"), 12)
+            isClickable = true; setOnClickListener { f() }
+            addView(ImageView(context).apply { setImageDrawable(icono(res, color, 26)) })
+            addView(TextView(context).apply { text = txt; textSize = 12.5f; setTextColor(color); gravity = Gravity.CENTER })
+            layoutParams = LinearLayout.LayoutParams(0, dp(68), 1f).apply { setMargins(dp(4), 0, dp(4), 0) }
+        }
+        acciones.addView(accion(R.drawable.ic_anterior, "Anterior") { mover(-1) })
+        acciones.addView(accion(R.drawable.ic_compartir, "Compartir") { compartir(fotos[i].uri) })
+        acciones.addView(accion(R.drawable.ic_borrar, "Eliminar", Color.parseColor("#FF8A80")) {
+            val f = fotos[i]
+            confirmar("¿Eliminar la foto ${f.nombre}?") {
+                val ok = runCatching { contentResolver.delete(f.uri, null, null) > 0 }.getOrDefault(false)
+                if (!ok) { aviso("No se pudo eliminar la foto"); return@confirmar }
+                fotos.removeAt(i)
+                alBorrar()
+                if (fotos.isEmpty()) dlg.dismiss()
+                else { i = i.coerceAtMost(fotos.size - 1); mostrarActual() }
+            }
+        })
+        acciones.addView(accion(R.drawable.ic_siguiente, "Siguiente") { mover(1) })
+        raizV.addView(acciones)
+        dlg.setContentView(raizV)
+        dlg.show()
+        mostrarActual()
+    }
+
+    /** Imagen con zoom (pellizcar / doble toque), arrastre y deslizamiento lateral para cambiar de foto. */
+    private inner class VistaZoom(val siguiente: () -> Unit, val anterior: () -> Unit) : View(this@MainActivity) {
+        private var bmp: Bitmap? = null
+        private var escala = 1f
+        private var dx = 0f
+        private var dy = 0f
+        private val pintura = Paint(Paint.FILTER_BITMAP_FLAG)
+        private val escalador = android.view.ScaleGestureDetector(context,
+            object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(d: android.view.ScaleGestureDetector): Boolean {
+                    zoom(d.scaleFactor, d.focusX, d.focusY); return true
+                }
+            })
+        private val gestos = android.view.GestureDetector(context, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (escala > 1.05f) { escala = 1f; dx = 0f; dy = 0f; invalidate() } else zoom(2.5f, e.x, e.y)
+                return true
+            }
+            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distX: Float, distY: Float): Boolean {
+                if (escala > 1.01f) { dx -= distX; dy -= distY; limitar(); invalidate() }
+                return true
+            }
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+                if (escala > 1.01f || e1 == null) return false
+                val ddx = e2.x - e1.x
+                if (Math.abs(ddx) > dp(60) && Math.abs(ddx) > Math.abs(e2.y - e1.y)) {
+                    if (ddx < 0) siguiente() else anterior(); return true
+                }
+                return false
+            }
+        })
+
+        fun poner(b: Bitmap?) { bmp = b; escala = 1f; dx = 0f; dy = 0f; invalidate() }
+
+        /** Rectángulo de la imagen ajustada a la vista (sin zoom). */
+        private fun base(): RectF? {
+            val b = bmp ?: return null
+            if (width == 0 || height == 0) return null
+            val s = minOf(width.toFloat() / b.width, height.toFloat() / b.height)
+            val w = b.width * s; val h = b.height * s
+            return RectF((width - w) / 2, (height - h) / 2, (width + w) / 2, (height + h) / 2)
+        }
+
+        private fun zoom(f: Float, fx: Float, fy: Float) {
+            val nueva = (escala * f).coerceIn(1f, 8f)
+            val k = nueva / escala
+            // mantiene fijo el punto bajo los dedos (zoom respecto al centro de la vista + desplazamiento)
+            val cx = width / 2f; val cy = height / 2f
+            dx = (dx - (fx - cx)) * k + (fx - cx)
+            dy = (dy - (fy - cy)) * k + (fy - cy)
+            escala = nueva
+            if (escala <= 1.001f) { dx = 0f; dy = 0f }
+            limitar(); invalidate()
+        }
+
+        private fun limitar() {
+            val r = base() ?: return
+            val mx = maxOf(0f, (r.width() * escala - width) / 2)
+            val my = maxOf(0f, (r.height() * escala - height) / 2)
+            dx = dx.coerceIn(-mx, mx); dy = dy.coerceIn(-my, my)
+        }
+
+        override fun onDraw(c: Canvas) {
+            val b = bmp
+            if (b == null) {
+                pintura.color = Color.LTGRAY; pintura.textSize = dp(16).toFloat(); pintura.textAlign = Paint.Align.CENTER
+                c.drawText("Cargando…", width / 2f, height / 2f, pintura); return
+            }
+            val r = base() ?: return
+            val cx = width / 2f; val cy = height / 2f
+            c.save()
+            c.translate(dx, dy)
+            c.scale(escala, escala, cx, cy)
+            c.drawBitmap(b, null, r, pintura)
+            c.restore()
+        }
+
+        override fun onTouchEvent(e: MotionEvent): Boolean {
+            escalador.onTouchEvent(e)
+            if (!escalador.isInProgress) gestos.onTouchEvent(e)
+            if (e.action == MotionEvent.ACTION_UP) performClick()
+            return true
+        }
+
+        override fun performClick(): Boolean = super.performClick()
     }
 
     // ---------- Notas ----------
