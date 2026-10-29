@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.speech.RecognizerIntent
 import android.text.InputType
+import android.util.Size
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -18,6 +19,9 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -59,6 +63,7 @@ class MainActivity : AppCompatActivity() {
     private val prefs by lazy { getSharedPreferences("fotosap", Context.MODE_PRIVATE) }
     private var tipos = mutableListOf<Tipo>()
     private var enEvento = false
+    private var enTerreno = false
     private var tipoActual = -1
     private var paredActual = -1
 
@@ -69,6 +74,14 @@ class MainActivity : AppCompatActivity() {
         val pi = prefs.getInt("pendPared", -1)
         val n = prefs.getInt("pendNum", -1)
         prefs.edit().remove("pendUri").apply()
+
+        if (modo == "terreno") {
+            enEvento = true; enTerreno = true
+            render()
+            if (ok && uri != null) procesarRegistro(uri, n)
+            else uri?.let { runCatching { contentResolver.delete(it, null, null) } }
+            return@registerForActivityResult
+        }
 
         if (!ok) {
             uri?.let { runCatching { contentResolver.delete(it, null, null) } }
@@ -85,11 +98,13 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         cargar()
         enEvento = savedInstanceState?.getBoolean("enEvento", false) ?: false
+        enTerreno = savedInstanceState?.getBoolean("enTerreno", false) ?: false
         tipoActual = savedInstanceState?.getInt("tipo", -1) ?: -1
         paredActual = savedInstanceState?.getInt("pared", -1) ?: -1
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
+                    enTerreno -> { enTerreno = false; render() }
                     paredActual >= 0 -> { paredActual = -1; render() }
                     tipoActual >= 0 -> { tipoActual = -1; render() }
                     enEvento -> { enEvento = false; render() }
@@ -103,6 +118,7 @@ class MainActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putBoolean("enEvento", enEvento)
+        outState.putBoolean("enTerreno", enTerreno)
         outState.putInt("tipo", tipoActual)
         outState.putInt("pared", paredActual)
     }
@@ -176,6 +192,7 @@ class MainActivity : AppCompatActivity() {
         if (tipoActual >= 0 && paredActual !in tipos[tipoActual].paredes.indices) paredActual = -1
         when {
             !enEvento -> pantallaEventos()
+            enTerreno -> pantallaTerreno()
             tipoActual < 0 -> pantallaTipos()
             paredActual < 0 -> pantallaTipo(tipoActual)
             else -> pantallaPared(tipoActual, paredActual)
@@ -209,6 +226,10 @@ class MainActivity : AppCompatActivity() {
     private fun pantallaTipos() {
         title = evento
         val col = columna()
+        col.addView(boton("📏  Notas en terreno (${registros().size})") {
+            enTerreno = true; render()
+        }.apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
+        col.addView(espacio(16))
         col.addView(texto("Tipos de singularidad  (✎ para editar)", 14f, true))
 
         val conteo = contarFotos()
@@ -353,6 +374,7 @@ class MainActivity : AppCompatActivity() {
                 "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?", arrayOf("$raiz/$nombre/%"))
         } catch (e: Exception) { 0 }
         guardarEventos(eventosGuardados().filter { it != nombre })
+        prefs.edit().remove("terreno_$nombre").apply()
         val quedan = resumenEventos()[nombre]?.first ?: 0
         if (quedan > 0)
             aviso("Se borraron $borradas fotos. Quedan $quedan que la app no puede borrar: elimínalas desde Mis archivos.")
@@ -506,7 +528,7 @@ class MainActivity : AppCompatActivity() {
         try {
             val uri = existente ?: contentResolver.insert(coleccion, ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
-                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                put(MediaStore.MediaColumns.MIME_TYPE, if (nombre.endsWith(".csv")) "text/csv" else "text/plain")
                 put(MediaStore.MediaColumns.RELATIVE_PATH, ruta)
             }) ?: run { aviso("No se pudo guardar $nombre"); return }
             contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { it.write(texto + "\n") }
@@ -545,6 +567,192 @@ class MainActivity : AppCompatActivity() {
         }
         escribirTexto("$raiz/$evento/${t.nombre}/${p.nombre}/", "Resumen notas.txt",
             if (hay) sb.toString().trim() else "")
+    }
+
+    // ---------- Notas en terreno (mediciones de espesor) ----------
+
+    data class Registro(val num: Int, val fecha: Long, var valor: String, var nota: String, val foto: String)
+
+    private val carpetaTerreno get() = "$raiz/$evento/Notas en terreno/"
+    private val fmtFecha = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault())
+    private val fmtHora = SimpleDateFormat("HH:mm", Locale.getDefault())
+
+    private fun registros(): MutableList<Registro> {
+        val l = mutableListOf<Registro>()
+        runCatching {
+            val arr = JSONArray(prefs.getString("terreno_$evento", "[]"))
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                l.add(Registro(o.getInt("num"), o.getLong("fecha"), o.optString("valor"),
+                    o.optString("nota"), o.optString("foto")))
+            }
+        }
+        return l
+    }
+
+    private fun guardarRegistros(l: List<Registro>) {
+        val arr = JSONArray()
+        l.sortedBy { it.num }.forEach {
+            arr.put(JSONObject().put("num", it.num).put("fecha", it.fecha).put("valor", it.valor)
+                .put("nota", it.nota).put("foto", it.foto))
+        }
+        prefs.edit().putString("terreno_$evento", arr.toString()).apply()
+        exportarCsv(l)
+    }
+
+    private fun pantallaTerreno() {
+        title = "Notas en terreno — $evento"
+        val col = columna()
+        col.addView(boton("📷  Nuevo registro (foto del medidor)") { nuevoRegistro() }
+            .apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
+        col.addView(texto("La app lee el valor de la foto; revísalo siempre antes de guardar.", 12f))
+        col.addView(espacio(8))
+
+        val lista = registros().sortedByDescending { it.num }
+        if (lista.isEmpty()) col.addView(texto("Aún no hay registros.", 13f))
+        for (r in lista) {
+            val f = Date(r.fecha)
+            val valor = if (r.valor.isBlank()) "sin valor" else "${r.valor.replace('.', ',')} mm"
+            val nota = if (r.nota.isBlank()) "" else "\n📝 " + r.nota.take(80) + if (r.nota.length > 80) "…" else ""
+            col.addView(boton("#%02d · %s · %s %s%s".format(r.num, valor, fmtFecha.format(f), fmtHora.format(f), nota)) {
+                editarRegistro(r, null, "")
+            }.apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL })
+        }
+        col.addView(espacio(16))
+        col.addView(boton("← Volver") { enTerreno = false; render() })
+        col.addView(espacio(16))
+        col.addView(texto("Se guardan en: $carpetaTerreno\nIncluye Registros.csv para abrir en Excel.", 12f))
+        setContentView(scroll(col))
+    }
+
+    private fun nuevoRegistro() {
+        val num = (registros().maxOfOrNull { it.num } ?: 0) + 1
+        val nombre = "Registro_%02d.jpg".format(num)
+        val uri = contentResolver.insert(coleccion, ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, carpetaTerreno)
+        }) ?: run { aviso("No se pudo crear el archivo"); return }
+        prefs.edit()
+            .putString("pendUri", uri.toString())
+            .putString("pendModo", "terreno")
+            .putInt("pendTipo", -1).putInt("pendPared", -1)
+            .putInt("pendNum", num)
+            .apply()
+        try { camara.launch(uri) }
+        catch (e: Exception) { contentResolver.delete(uri, null, null); aviso("No se encontró app de cámara") }
+    }
+
+    /** Foto lista: leer el número con reconocimiento de texto (sin internet) y abrir el formulario. */
+    private fun procesarRegistro(uri: Uri, num: Int) {
+        val r = Registro(num, System.currentTimeMillis(), "", "", "Registro_%02d.jpg".format(num))
+        val espera = AlertDialog.Builder(this).setMessage("Leyendo el valor de la foto…").setCancelable(false).show()
+        val listo: (String) -> Unit = { texto ->
+            espera.dismiss()
+            r.valor = extraerNumero(texto)
+            editarRegistro(r, uri, texto)
+        }
+        try {
+            val img = InputImage.fromFilePath(this, uri)
+            TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).process(img)
+                .addOnSuccessListener { listo(it.text) }
+                .addOnFailureListener { listo("") }
+        } catch (e: Exception) { listo("") }
+    }
+
+    /** Elige el número más probable: primero uno con decimales (ej. 12.45). */
+    private fun extraerNumero(texto: String): String {
+        val limpio = texto.replace(" ", "")
+        val conDecimal = Regex("\\d{1,3}[.,]\\d{1,3}").find(limpio)?.value
+        val entero = Regex("\\d+").findAll(limpio).map { it.value }.firstOrNull()
+        return (conDecimal ?: entero ?: "").replace(',', '.')
+    }
+
+    /** Formulario de un registro. [uriNueva] != null cuando es un registro recién fotografiado. */
+    private fun editarRegistro(r: Registro, uriNueva: Uri?, textoLeido: String) {
+        val esNuevo = uriNueva != null
+        val uriFoto = uriNueva ?: buscarArchivo(carpetaTerreno, r.foto)
+        val col = columna()
+
+        uriFoto?.let { u ->
+            runCatching { contentResolver.loadThumbnail(u, Size(800, 800), null) }.getOrNull()?.let { bmp ->
+                col.addView(ImageView(this).apply {
+                    setImageBitmap(bmp); adjustViewBounds = true
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(200))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                })
+            }
+        }
+        if (esNuevo) col.addView(texto(
+            if (textoLeido.isBlank()) "No se pudo leer texto en la foto. Escribe el valor."
+            else "Texto leído: " + textoLeido.replace("\n", " ").take(60), 12f))
+
+        col.addView(texto("Espesor (mm)", 13f, true))
+        val etValor = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setText(r.valor); setSelection(text.length)
+        }
+        col.addView(etValor)
+        col.addView(texto("Nota", 13f, true))
+        val etNota = EditText(this).apply {
+            setText(r.nota); minLines = 3
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                        InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        }
+        col.addView(etNota)
+        notaEditando = etNota
+        col.addView(boton("🎤  Dictar nota") { dictar() })
+        val f = Date(r.fecha)
+        col.addView(texto("${fmtFecha.format(f)} ${fmtHora.format(f)}", 12f))
+
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("Registro #%02d".format(r.num))
+            .setView(scroll(col))
+            .setCancelable(false)
+            .setPositiveButton("Guardar") { _, _ ->
+                r.valor = etValor.text.toString().trim().replace(',', '.')
+                r.nota = etNota.text.toString().trim()
+                val l = registros().filter { it.num != r.num }.toMutableList()
+                l.add(r)
+                guardarRegistros(l)
+                escribirTexto(carpetaTerreno, "Registro_%02d.txt".format(r.num), textoRegistro(r))
+                aviso("Registro guardado")
+                render()
+            }
+            .setNegativeButton(if (esNuevo) "Descartar" else "Cancelar") { _, _ ->
+                if (esNuevo) runCatching { contentResolver.delete(uriNueva!!, null, null) }
+            }
+            .setOnDismissListener { notaEditando = null }
+        if (!esNuevo) dlg.setNeutralButton("Eliminar") { _, _ ->
+            confirmar("¿Eliminar el registro #%02d y su foto?".format(r.num)) { borrarRegistro(r) }
+        }
+        dlg.show()
+    }
+
+    private fun textoRegistro(r: Registro): String {
+        val f = Date(r.fecha)
+        return "Registro #%02d\nFecha: %s\nHora: %s\nEspesor: %s mm\nNota: %s\nFoto: %s".format(
+            r.num, fmtFecha.format(f), fmtHora.format(f), r.valor.replace('.', ','), r.nota, r.foto)
+    }
+
+    private fun borrarRegistro(r: Registro) {
+        buscarArchivo(carpetaTerreno, r.foto)?.let { runCatching { contentResolver.delete(it, null, null) } }
+        escribirTexto(carpetaTerreno, "Registro_%02d.txt".format(r.num), "")
+        guardarRegistros(registros().filter { it.num != r.num })
+        render()
+    }
+
+    /** Registros.csv (separador ; y coma decimal, para Excel en español). */
+    private fun exportarCsv(l: List<Registro>) {
+        if (l.isEmpty()) { escribirTexto(carpetaTerreno, "Registros.csv", ""); return }
+        val sb = StringBuilder("﻿N°;Fecha;Hora;Espesor (mm);Nota;Foto\n")
+        for (r in l.sortedBy { it.num }) {
+            val f = Date(r.fecha)
+            val nota = r.nota.replace("\"", "\"\"").replace("\n", " ")
+            sb.append("${r.num};${fmtFecha.format(f)};${fmtHora.format(f)};${r.valor.replace('.', ',')};\"$nota\";${r.foto}\n")
+        }
+        escribirTexto(carpetaTerreno, "Registros.csv", sb.toString().trimEnd())
     }
 
     // ---------- Cámara / MediaStore ----------

@@ -11,8 +11,8 @@ android {
         applicationId = "cl.iqs.fotosap"
         minSdk = 29          // Android 10 o superior
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     // Clave fija: así cada APK nuevo se instala encima del anterior sin desinstalar
@@ -42,4 +42,6 @@ android {
 
 dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
+    // Reconocimiento de texto sin internet (modelo incluido en la app)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 }
