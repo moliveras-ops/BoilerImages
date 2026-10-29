@@ -129,7 +129,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         capturarErrores()
-        android.util.Log.i("BoilerImage", "onCreate claves=${prefs.all.keys}")
         plantilla = savedInstanceState?.getString("plantilla")
         enCalderas = savedInstanceState?.getBoolean("enCalderas", false) ?: false
         plantaActual = savedInstanceState?.getString("plantaActual")
@@ -420,13 +419,14 @@ class MainActivity : AppCompatActivity() {
             val info = conteo[carpeta(t, p, n)]
             val total = info?.let { it.first + it.second } ?: 0
             grid.addView(Button(this).apply {
-                val nota = if (carpeta(t, p, n) in conNota) " · nota" else ""
-                val codigo = "%s %02d".format(t.prefijo, n)
-                val sub = if (total == 0) "sin fotos" else "$total foto${if (total == 1) "" else "s"}$nota"
+                val nota = if (carpeta(t, p, n) in conNota) "\ncon nota" else ""
+                val codigo = "%s%02d".format(t.prefijo, n)
+                val sub = (if (total == 1) "1 foto" else "$total fotos") + nota
                 text = android.text.SpannableString("$codigo\n$sub").apply {
                     setSpan(android.text.style.RelativeSizeSpan(0.72f), codigo.length + 1, length, 0)
                 }
-                isAllCaps = false; typeface = medio; textSize = 16f
+                isAllCaps = false; typeface = medio; textSize = 15f
+                setPadding(dp(2), dp(6), dp(2), dp(6)); maxLines = 3; minWidth = 0; minimumWidth = 0
                 stateListAnimator = null; elevation = 0f
                 val est = estado(info)
                 setTextColor(if (est == 0) C.tinta else Color.WHITE)
@@ -454,7 +454,7 @@ class MainActivity : AppCompatActivity() {
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
         setPadding(dp(2), dp(4), 0, dp(10))
         for ((color, borde, txt) in listOf(Triple(C.superficie, C.borde, "Sin fotos"), Triple(C.parcial, null, "Incompleta"),
-                                            Triple(C.ok, null, "General + detalle"))) {
+                                            Triple(C.ok, null, "Completa"))) {
             addView(View(context).apply {
                 background = GradientDrawable().apply { cornerRadius = dp(4).toFloat(); setColor(color); borde?.let { setStroke(dp(1), it) } }
                 layoutParams = LinearLayout.LayoutParams(dp(14), dp(14)).apply { marginEnd = dp(6) }
@@ -1350,7 +1350,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun guardarSesionMed(s: JSONObject?) {
         if (s == null) {
-            android.util.Log.i("BoilerImage", "fin de sesión de medición", Throwable())
             prefs.edit().remove("pendMed").apply(); cacheMed = null; moviendo = -1
         }
         else prefs.edit().putString("pendMed", s.toString()).apply()
@@ -1457,7 +1456,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun alVolverCamaraMed(modo: String, ok: Boolean, uri: Uri?) {
         val s = sesionMed()
-        android.util.Log.i("BoilerImage", "volver cámara sesión=${s != null} claves=${prefs.all.keys}")
         if (!ok || uri == null || s == null) {
             uri?.let { runCatching { contentResolver.delete(it, null, null) } }
             if (modo == "medBase") { guardarSesionMed(null); volverDeMedicion(s) } else render()
