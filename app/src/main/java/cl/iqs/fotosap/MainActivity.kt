@@ -3366,18 +3366,17 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val fila1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        fila1.addView(TextView(this).apply {
-            text = t.substringBefore('\n'); textSize = 17f; typeface = medio; setTextColor(C.tinta)
-        })
-        if (activo) fila1.addView(TextView(this).apply {
+        // "ACTIVO" en su propia línea, sobre el título: así un nombre largo no lo aplasta
+        if (activo) textos.addView(TextView(this).apply {
             text = "ACTIVO"; textSize = 10.5f; typeface = medio; letterSpacing = 0.08f; setTextColor(C.primario)
             background = GradientDrawable().apply { cornerRadius = dp(8).toFloat(); setColor(C.primarioSuave) }
-            setPadding(dp(8), dp(2), dp(8), dp(2))
+            setPadding(dp(8), dp(2), dp(8), dp(2)); maxLines = 1
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                .apply { marginStart = dp(8) }
+                .apply { bottomMargin = dp(4) }
         })
-        textos.addView(fila1)
+        textos.addView(TextView(this).apply {
+            text = t.substringBefore('\n'); textSize = 17f; typeface = medio; setTextColor(C.tinta)
+        })
         val detalle = t.substringAfter('\n', "")
         if (detalle.isNotBlank()) textos.addView(TextView(this).apply {
             text = detalle; textSize = 13.5f; setTextColor(C.tenue); setLineSpacing(0f, 1.1f)

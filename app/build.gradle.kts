@@ -11,8 +11,8 @@ android {
         applicationId = "cl.iqs.fotosap"
         minSdk = 29          // Android 10 o superior
         targetSdk = 34
-        versionCode = 24
-        versionName = "3.3"
+        versionCode = 25
+        versionName = "3.4"
     }
 
     // Clave fija: así cada APK nuevo se instala encima del anterior sin desinstalar
