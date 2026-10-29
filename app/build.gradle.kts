@@ -15,8 +15,22 @@ android {
         versionName = "1.0"
     }
 
+    // Clave fija: así cada APK nuevo se instala encima del anterior sin desinstalar
+    signingConfigs {
+        create("fija") {
+            storeFile = rootProject.file("keystore/boilerimage.jks")
+            storePassword = "boilerimage"
+            keyAlias = "boilerimage"
+            keyPassword = "boilerimage"
+        }
+    }
+
     buildTypes {
-        release { isMinifyEnabled = false }
+        debug { signingConfig = signingConfigs.getByName("fija") }
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("fija")
+        }
     }
 
     compileOptions {
