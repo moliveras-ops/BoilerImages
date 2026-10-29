@@ -2,11 +2,13 @@ package cl.iqs.fotosap
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
+import android.speech.RecognizerIntent
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -28,15 +30,32 @@ import java.util.Locale
  * Pantallas: Eventos → Tipos → Paredes → Singularidades
  *
  * Estructura en el teléfono (visible por USB):
- *   Pictures/FotosAP/<Evento>/<Tipo>/<Pared>/<Prefijo> 01/
- *       AP01_general_1.jpg, AP01_detalle_1.jpg ...
+ *   Documents/BoilerImage/<Evento>/<Tipo>/<Pared>/<Prefijo> 01/
+ *       AP01_general_1.jpg, AP01_detalle_1.jpg ..., nota.txt
+ *   y en cada pared: Resumen notas.txt
  */
 class MainActivity : AppCompatActivity() {
 
     data class Pared(var nombre: String, var cantidad: Int)
     data class Tipo(var nombre: String, var prefijo: String, val paredes: MutableList<Pared>)
 
-    private val raiz = "Pictures/FotosAP"
+    // Documents permite guardar fotos y notas .txt en la misma carpeta
+    private val raiz = "Documents/BoilerImage"
+    private val coleccion: Uri get() = MediaStore.Files.getContentUri("external")
+    private val soloImagenes = " AND ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'image/%'"
+
+    // Campo de texto de la nota abierta (para insertar lo dictado)
+    private var notaEditando: EditText? = null
+
+    private val dictado = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val txt = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        val et = notaEditando
+        if (!txt.isNullOrBlank() && et != null) {
+            val actual = et.text.toString().trimEnd()
+            et.setText(if (actual.isEmpty()) txt else "$actual $txt")
+            et.setSelection(et.text.length)
+        }
+    }
     private val prefs by lazy { getSharedPreferences("fotosap", Context.MODE_PRIVATE) }
     private var tipos = mutableListOf<Tipo>()
     private var enEvento = false
@@ -234,16 +253,18 @@ class MainActivity : AppCompatActivity() {
         val p = t.paredes[pi]
         title = "${t.prefijo} — ${p.nombre}"
         val col = columna()
-        col.addView(texto("Gris: sin fotos · Naranjo: incompleto · Verde: general + detalle", 12f))
+        col.addView(texto("Gris: sin fotos · Naranjo: incompleto · Verde: general + detalle · 📝 tiene nota", 12f))
         col.addView(espacio(8))
 
         val conteo = contarFotos()
+        val conNota = carpetasConNota()
         val grid = GridLayout(this).apply { columnCount = 4 }
         for (n in 1..p.cantidad) {
             val info = conteo[carpeta(t, p, n)]
             val total = info?.let { it.first + it.second } ?: 0
             grid.addView(Button(this).apply {
-                text = "%s %02d\n%d 📷".format(t.prefijo, n, total)
+                val nota = if (carpeta(t, p, n) in conNota) " 📝" else ""
+                text = "%s %02d\n%d 📷%s".format(t.prefijo, n, total, nota)
                 isAllCaps = false
                 setTextColor(Color.WHITE)
                 setBackgroundColor(when (estado(info)) {
@@ -287,8 +308,8 @@ class MainActivity : AppCompatActivity() {
     private fun resumenEventos(): Map<String, Pair<Int, Long>> {
         val res = HashMap<String, Pair<Int, Long>>()
         val proy = arrayOf(MediaStore.Images.Media.RELATIVE_PATH, MediaStore.Images.Media.DATE_ADDED)
-        val sel = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        contentResolver.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, proy, sel,
+        val sel = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?" + soloImagenes
+        contentResolver.query(coleccion, proy, sel,
             arrayOf("$raiz/%"), null)?.use { c ->
             while (c.moveToNext()) {
                 val ruta = c.getString(0) ?: continue
@@ -328,7 +349,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun borrarEvento(nombre: String) {
         val borradas = try {
-            contentResolver.delete(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            contentResolver.delete(coleccion,
                 "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?", arrayOf("$raiz/$nombre/%"))
         } catch (e: Exception) { 0 }
         guardarEventos(eventosGuardados().filter { it != nombre })
@@ -399,15 +420,131 @@ class MainActivity : AppCompatActivity() {
     private fun menuSingularidad(ti: Int, pi: Int, n: Int, info: Pair<Int, Int>?) {
         val t = tipos[ti]
         val p = t.paredes[pi]
-        AlertDialog.Builder(this)
+        val nota = leerNota(carpeta(t, p, n))
+        val col = columna()
+        col.addView(texto("Generales: ${info?.first ?: 0}   ·   Detalles: ${info?.second ?: 0}", 14f))
+        col.addView(texto(if (nota.isBlank()) "Sin nota" else "📝 $nota", 13f))
+        col.addView(espacio(8))
+        val dlg = AlertDialog.Builder(this)
             .setTitle("%s %02d — %s".format(t.prefijo, n, p.nombre))
-            .setMessage("Generales: ${info?.first ?: 0}\nDetalles: ${info?.second ?: 0}\n\n" +
-                        "Detalles = ráfaga: la cámara se vuelve a abrir después de cada foto. " +
-                        "Presiona Atrás en la cámara para terminar.")
-            .setPositiveButton("📷 General") { _, _ -> tomarFoto(ti, pi, n, "general") }
-            .setNeutralButton("🔍 Detalles") { _, _ -> tomarFoto(ti, pi, n, "detalle") }
+            .setView(scroll(col))
+            .setNegativeButton("Cerrar", null)
+            .create()
+        col.addView(boton("📷  Foto general") { dlg.dismiss(); tomarFoto(ti, pi, n, "general") })
+        col.addView(boton("🔍  Detalles (ráfaga)") { dlg.dismiss(); tomarFoto(ti, pi, n, "detalle") })
+        col.addView(boton("📝  Nota (escribir o dictar)") { dlg.dismiss(); editarNota(ti, pi, n) })
+        col.addView(texto("Ráfaga: la cámara se vuelve a abrir después de cada foto. " +
+                          "Presiona Atrás en la cámara para terminar.", 12f))
+        dlg.show()
+    }
+
+    // ---------- Notas ----------
+
+    private fun editarNota(ti: Int, pi: Int, n: Int) {
+        val t = tipos[ti]
+        val p = t.paredes[pi]
+        val ruta = carpeta(t, p, n)
+        val et = EditText(this).apply {
+            setText(leerNota(ruta))
+            minLines = 4
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                        InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setSelection(text.length)
+        }
+        notaEditando = et
+        val col = columna()
+        col.addView(et)
+        col.addView(boton("🎤  Dictar") { dictar() })
+        AlertDialog.Builder(this)
+            .setTitle("Nota %s %02d — %s".format(t.prefijo, n, p.nombre))
+            .setView(col)
+            .setPositiveButton("Guardar") { _, _ ->
+                guardarNota(ruta, et.text.toString().trim())
+                actualizarResumen(t, p)
+                render()
+            }
             .setNegativeButton("Cancelar", null)
+            .setOnDismissListener { notaEditando = null }
             .show()
+    }
+
+    private fun dictar() {
+        val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-CL")
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Dicta la nota")
+        }
+        try { dictado.launch(i) }
+        catch (e: Exception) { aviso("El dictado por voz no está disponible en este teléfono") }
+    }
+
+    /** Busca un archivo por nombre dentro de una carpeta. */
+    private fun buscarArchivo(ruta: String, nombre: String): Uri? {
+        val sel = "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ?"
+        contentResolver.query(coleccion, arrayOf(MediaStore.MediaColumns._ID), sel,
+            arrayOf(ruta, nombre), null)?.use { c ->
+            if (c.moveToFirst()) return android.content.ContentUris.withAppendedId(coleccion, c.getLong(0))
+        }
+        return null
+    }
+
+    private fun leerTexto(uri: Uri): String =
+        runCatching { contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: "" }
+            .getOrDefault("")
+
+    private fun leerNota(ruta: String): String =
+        buscarArchivo(ruta, "nota.txt")?.let { leerTexto(it) }?.trim() ?: ""
+
+    /** Crea o reemplaza un .txt; si el texto está vacío, borra el archivo. */
+    private fun escribirTexto(ruta: String, nombre: String, texto: String) {
+        val existente = buscarArchivo(ruta, nombre)
+        if (texto.isBlank()) {
+            existente?.let { runCatching { contentResolver.delete(it, null, null) } }
+            return
+        }
+        try {
+            val uri = existente ?: contentResolver.insert(coleccion, ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
+                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, ruta)
+            }) ?: run { aviso("No se pudo guardar $nombre"); return }
+            contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { it.write(texto + "\n") }
+        } catch (e: Exception) {
+            aviso("No se pudo guardar $nombre")
+        }
+    }
+
+    private fun guardarNota(ruta: String, texto: String) {
+        escribirTexto(ruta, "nota.txt", texto)
+        aviso(if (texto.isBlank()) "Nota eliminada" else "Nota guardada")
+    }
+
+    private fun carpetasConNota(): Set<String> {
+        val res = HashSet<String>()
+        val sel = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ?"
+        contentResolver.query(coleccion, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH), sel,
+            arrayOf("$raiz/$evento/%", "nota.txt"), null)?.use { c ->
+            while (c.moveToNext()) c.getString(0)?.let { res.add(it) }
+        }
+        return res
+    }
+
+    /** Archivo "Resumen notas.txt" en la carpeta de la pared con todas sus notas. */
+    private fun actualizarResumen(t: Tipo, p: Pared) {
+        val sb = StringBuilder()
+        sb.append("$evento — ${t.nombre} — ${p.nombre}\n")
+        sb.append("Actualizado: ${SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date())}\n\n")
+        var hay = false
+        for (n in 1..p.cantidad) {
+            val nota = leerNota(carpeta(t, p, n))
+            if (nota.isNotBlank()) {
+                hay = true
+                sb.append("%s %02d:\n%s\n\n".format(t.prefijo, n, nota))
+            }
+        }
+        escribirTexto("$raiz/$evento/${t.nombre}/${p.nombre}/", "Resumen notas.txt",
+            if (hay) sb.toString().trim() else "")
     }
 
     // ---------- Cámara / MediaStore ----------
@@ -426,7 +563,7 @@ class MainActivity : AppCompatActivity() {
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             put(MediaStore.Images.Media.RELATIVE_PATH, ruta)
         }
-        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, valores)
+        val uri = contentResolver.insert(coleccion, valores)
         if (uri == null) { aviso("No se pudo crear el archivo"); return }
 
         prefs.edit()
@@ -448,9 +585,9 @@ class MainActivity : AppCompatActivity() {
     private fun contarFotos(): Map<String, Pair<Int, Int>> {
         val res = HashMap<String, Pair<Int, Int>>()
         val proy = arrayOf(MediaStore.Images.Media.RELATIVE_PATH, MediaStore.Images.Media.DISPLAY_NAME)
-        val sel = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
+        val sel = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?" + soloImagenes
         val args = arrayOf("$raiz/$evento/%")
-        contentResolver.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, proy, sel, args, null)?.use { c ->
+        contentResolver.query(coleccion, proy, sel, args, null)?.use { c ->
             while (c.moveToNext()) {
                 val ruta = c.getString(0) ?: continue
                 val nombre = c.getString(1) ?: ""
