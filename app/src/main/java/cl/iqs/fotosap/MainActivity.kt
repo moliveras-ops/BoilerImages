@@ -129,6 +129,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         capturarErrores()
+        android.util.Log.i("BoilerImage", "onCreate claves=${prefs.all.keys}")
         plantilla = savedInstanceState?.getString("plantilla")
         enCalderas = savedInstanceState?.getBoolean("enCalderas", false) ?: false
         plantaActual = savedInstanceState?.getString("plantaActual")
@@ -1456,6 +1457,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun alVolverCamaraMed(modo: String, ok: Boolean, uri: Uri?) {
         val s = sesionMed()
+        android.util.Log.i("BoilerImage", "volver cámara sesión=${s != null} claves=${prefs.all.keys}")
         if (!ok || uri == null || s == null) {
             uri?.let { runCatching { contentResolver.delete(it, null, null) } }
             if (modo == "medBase") { guardarSesionMed(null); volverDeMedicion(s) } else render()
