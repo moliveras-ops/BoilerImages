@@ -64,6 +64,8 @@ class MainActivity : AppCompatActivity() {
     private var tipos = mutableListOf<Tipo>()
     private var enEvento = false
     private var enTerreno = false
+    private var enCalderas = false
+    private var plantilla: String? = null   // caldera que se está editando
     private var tipoActual = -1
     private var paredActual = -1
 
@@ -96,6 +98,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        plantilla = savedInstanceState?.getString("plantilla")
+        enCalderas = savedInstanceState?.getBoolean("enCalderas", false) ?: false
         cargar()
         enEvento = savedInstanceState?.getBoolean("enEvento", false) ?: false
         enTerreno = savedInstanceState?.getBoolean("enTerreno", false) ?: false
@@ -107,6 +111,8 @@ class MainActivity : AppCompatActivity() {
                     enTerreno -> { enTerreno = false; enEvento = false; render() }
                     paredActual >= 0 -> { paredActual = -1; render() }
                     tipoActual >= 0 -> { tipoActual = -1; render() }
+                    plantilla != null -> cerrarPlantilla()
+                    enCalderas -> { enCalderas = false; render() }
                     enEvento -> { enEvento = false; render() }
                     else -> finish()
                 }
@@ -119,6 +125,8 @@ class MainActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
         outState.putBoolean("enEvento", enEvento)
         outState.putBoolean("enTerreno", enTerreno)
+        outState.putBoolean("enCalderas", enCalderas)
+        outState.putString("plantilla", plantilla)
         outState.putInt("tipo", tipoActual)
         outState.putInt("pared", paredActual)
     }
@@ -143,10 +151,19 @@ class MainActivity : AppCompatActivity() {
         Tipo("Quemadores de Carga", "QC", dos(2)),
         Tipo("Boquillas de Licor", "BL", cuatro(4)))
 
+    /** Clave donde se guarda la configuración: la caldera en edición o el evento actual. */
+    private fun claveTipos() = plantilla?.let { "tpl_$it" } ?: "tipos_$evento"
+
     private fun cargar() {
-        val s = prefs.getString("tipos", null)
-        if (s == null) { tipos = porDefecto(); guardar(); return }
-        tipos = mutableListOf()
+        // Eventos antiguos sin configuración propia usan la configuración general anterior
+        val s = prefs.getString(claveTipos(), null)
+            ?: (if (plantilla == null) prefs.getString("tipos", null) else null)
+        tipos = desdeJson(s) ?: porDefecto()
+    }
+
+    private fun desdeJson(s: String?): MutableList<Tipo>? {
+        if (s == null) return null
+        val tipos = mutableListOf<Tipo>()
         try {
             val arr = JSONArray(s)
             for (i in 0 until arr.length()) {
@@ -160,18 +177,23 @@ class MainActivity : AppCompatActivity() {
                 tipos.add(Tipo(o.getString("nombre"), o.getString("prefijo"), lista))
             }
         } catch (e: Exception) {
-            tipos = porDefecto(); guardar()
+            return null
         }
+        return tipos
     }
 
     private fun guardar() {
+        prefs.edit().putString(claveTipos(), aJson(tipos)).apply()
+    }
+
+    private fun aJson(lista: List<Tipo>): String {
         val arr = JSONArray()
-        for (t in tipos) {
+        for (t in lista) {
             val ps = JSONArray()
             t.paredes.forEach { ps.put(JSONObject().put("n", it.nombre).put("c", it.cantidad)) }
             arr.put(JSONObject().put("nombre", t.nombre).put("prefijo", t.prefijo).put("paredes", ps))
         }
-        prefs.edit().putString("tipos", arr.toString()).apply()
+        return arr.toString()
     }
 
     private fun limpiar(s: String) =
@@ -192,6 +214,9 @@ class MainActivity : AppCompatActivity() {
         if (tipoActual >= 0 && paredActual !in tipos[tipoActual].paredes.indices) paredActual = -1
         when {
             enTerreno -> pantallaTerreno()
+            plantilla != null && tipoActual < 0 -> pantallaPlantilla()
+            plantilla != null -> pantallaPlantillaParedes(tipoActual)
+            enCalderas -> pantallaCalderas()
             !enEvento -> pantallaEventos()
             tipoActual < 0 -> pantallaTipos()
             paredActual < 0 -> pantallaTipo(tipoActual)
@@ -220,9 +245,12 @@ class MainActivity : AppCompatActivity() {
             val detalle = if (r == null) "sin fotos"
                 else "${r.first} fotos · última: ${fecha.format(Date(r.second * 1000))}"
             val marca = if (nombre == evento) "● " else ""
-            col.addView(fila("$marca$nombre\n$detalle", { abrirEvento(nombre) }) { menuEvento(nombre) })
+            val cald = prefs.getString("caldera_$nombre", null)?.let { "\n🏭 $it" } ?: ""
+            col.addView(fila("$marca$nombre\n$detalle$cald", { abrirEvento(nombre) }) { menuEvento(nombre) })
         }
         col.addView(boton("＋ Nuevo evento") { nuevoEvento() })
+        col.addView(espacio(12))
+        col.addView(boton("🏭  Calderas (plantillas: ${calderas().size})") { enCalderas = true; render() })
         col.addView(espacio(20))
         col.addView(texto("Carpeta en el teléfono:\nAlmacenamiento interno > $raiz", 13f))
         setContentView(scroll(col))
@@ -254,6 +282,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         col.addView(boton("＋ Agregar tipo") { agregarTipo() })
+        col.addView(boton("💾  Guardar como plantilla de caldera") { guardarComoPlantilla() })
         col.addView(boton("📊  Exportar todas las notas a Excel") {
             val n = exportarNotas()
             aviso(if (n == 0) "No hay notas en este evento"
@@ -364,12 +393,14 @@ class MainActivity : AppCompatActivity() {
     private fun abrirEvento(nombre: String) {
         evento = nombre
         guardarEventos(eventosGuardados() + nombre)
+        plantilla = null; enCalderas = false
+        cargar()
         enEvento = true; tipoActual = -1; paredActual = -1
         render()
     }
 
     private fun nuevoEvento() {
-        dialogoTexto("Nombre del evento (ej. PGP Santa Fe 2026)", "") { abrirEvento(limpiar(it)) }
+        crearEvento { abrirEvento(it) }
     }
 
     private fun menuEvento(nombre: String) {
@@ -391,7 +422,7 @@ class MainActivity : AppCompatActivity() {
                 "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?", arrayOf("$raiz/$nombre/%"))
         } catch (e: Exception) { 0 }
         guardarEventos(eventosGuardados().filter { it != nombre })
-        prefs.edit().remove("terreno_$nombre").apply()
+        prefs.edit().remove("terreno_$nombre").remove("tipos_$nombre").remove("caldera_$nombre").apply()
         val quedan = resumenEventos()[nombre]?.first ?: 0
         if (quedan > 0)
             aviso("Se borraron $borradas fotos. Quedan $quedan que la app no puede borrar: elimínalas desde Mis archivos.")
@@ -586,6 +617,164 @@ class MainActivity : AppCompatActivity() {
             if (hay) sb.toString().trim() else "")
     }
 
+    // ---------- Calderas (plantillas) ----------
+
+    private fun calderas(): MutableList<String> {
+        val l = mutableListOf<String>()
+        runCatching {
+            val arr = JSONArray(prefs.getString("calderas", "[]"))
+            for (i in 0 until arr.length()) l.add(arr.getString(i))
+        }
+        return l
+    }
+
+    private fun guardarCalderas(l: List<String>) {
+        val arr = JSONArray(); l.distinct().forEach { arr.put(it) }
+        prefs.edit().putString("calderas", arr.toString()).apply()
+    }
+
+    private fun resumenPlantilla(nombre: String): String {
+        val l = desdeJson(prefs.getString("tpl_$nombre", null)) ?: return ""
+        return "${l.size} tipos · ${l.sumOf { t -> t.paredes.sumOf { it.cantidad } }} singularidades"
+    }
+
+    /** Pide nombre del evento y, si hay calderas, cuál usar. Llama [luego] con el nombre. */
+    private fun crearEvento(luego: (String) -> Unit) {
+        dialogoTexto("Nombre del evento (ej. PGP Santa Fe 2026)", "") { n0 ->
+            val nombre = limpiar(n0)
+            val lista = calderas()
+            val aplicar: (String?) -> Unit = { tpl ->
+                if (!prefs.contains("tipos_$nombre")) {
+                    val json = tpl?.let { prefs.getString("tpl_$it", null) }
+                        ?: prefs.getString("tipos", null) ?: aJson(porDefecto())
+                    val ed = prefs.edit().putString("tipos_$nombre", json)
+                    if (tpl != null) ed.putString("caldera_$nombre", tpl)
+                    ed.apply()
+                }
+                luego(nombre)
+            }
+            if (lista.isEmpty() || prefs.contains("tipos_$nombre")) aplicar(null)
+            else AlertDialog.Builder(this)
+                .setTitle("¿Qué caldera es?")
+                .setItems((lista.map { "🏭 $it" } + "Sin plantilla (configuración por defecto)").toTypedArray()) { _, i ->
+                    aplicar(lista.getOrNull(i))
+                }
+                .setCancelable(false)
+                .show()
+        }
+    }
+
+    private fun pantallaCalderas() {
+        title = "Calderas (plantillas)"
+        val col = columna()
+        col.addView(texto("Define cada caldera una sola vez. Al crear un evento eliges la caldera " +
+                          "y se cargan sus tipos, paredes y cantidades.", 13f))
+        col.addView(espacio(8))
+        val lista = calderas()
+        if (lista.isEmpty()) col.addView(texto("Aún no hay calderas.", 13f))
+        for (c in lista) {
+            col.addView(fila("🏭 $c\n${resumenPlantilla(c)}", { abrirPlantilla(c) }) { menuCaldera(c) })
+        }
+        col.addView(boton("＋ Nueva caldera") {
+            dialogoTexto("Nombre de la caldera (ej. Caldera Recuperadora Valdivia)", "") { n0 ->
+                val n = limpiar(n0)
+                if (n in calderas()) { aviso("Ya existe una caldera con ese nombre"); return@dialogoTexto }
+                prefs.edit().putString("tpl_$n", aJson(porDefecto())).apply()
+                guardarCalderas(calderas() + n)
+                abrirPlantilla(n)
+            }
+        })
+        col.addView(espacio(16))
+        col.addView(boton("← Volver a eventos") { enCalderas = false; render() })
+        setContentView(scroll(col))
+    }
+
+    private fun menuCaldera(c: String) {
+        AlertDialog.Builder(this).setTitle(c)
+            .setItems(arrayOf("Editar", "Renombrar", "Duplicar", "Eliminar")) { _, w ->
+                when (w) {
+                    0 -> abrirPlantilla(c)
+                    1 -> dialogoTexto("Nuevo nombre", c) { n0 ->
+                        val n = limpiar(n0)
+                        if (n == c) return@dialogoTexto
+                        if (n in calderas()) { aviso("Ya existe una caldera con ese nombre"); return@dialogoTexto }
+                        val json = prefs.getString("tpl_$c", null)
+                        prefs.edit().putString("tpl_$n", json).remove("tpl_$c").apply()
+                        guardarCalderas(calderas().map { if (it == c) n else it })
+                        render()
+                    }
+                    2 -> dialogoTexto("Nombre de la copia", "$c (copia)") { n0 ->
+                        val n = limpiar(n0)
+                        if (n in calderas()) { aviso("Ya existe una caldera con ese nombre"); return@dialogoTexto }
+                        prefs.edit().putString("tpl_$n", prefs.getString("tpl_$c", null)).apply()
+                        guardarCalderas(calderas() + n)
+                        render()
+                    }
+                    3 -> confirmar("¿Eliminar la caldera \"$c\"? Los eventos ya creados no cambian.") {
+                        prefs.edit().remove("tpl_$c").apply()
+                        guardarCalderas(calderas().filter { it != c })
+                        render()
+                    }
+                }
+            }.show()
+    }
+
+    private fun abrirPlantilla(c: String) {
+        plantilla = c; enCalderas = true; tipoActual = -1; paredActual = -1
+        cargar(); render()
+    }
+
+    private fun cerrarPlantilla() {
+        plantilla = null; tipoActual = -1; paredActual = -1
+        cargar(); render()
+    }
+
+    private fun pantallaPlantilla() {
+        title = "🏭 $plantilla"
+        val col = columna()
+        col.addView(texto("Tipos de singularidad  (✎ para editar)", 14f, true))
+        tipos.forEachIndexed { i, t ->
+            col.addView(fila("${t.nombre} (${t.prefijo})\n${t.paredes.size} paredes · " +
+                             "${t.paredes.sumOf { it.cantidad }} singularidades",
+                { tipoActual = i; render() }) { menuTipo(i) })
+        }
+        col.addView(boton("＋ Agregar tipo") { agregarTipo() })
+        col.addView(espacio(16))
+        col.addView(boton("✓ Listo — volver a calderas") { cerrarPlantilla() })
+        setContentView(scroll(col))
+    }
+
+    private fun pantallaPlantillaParedes(ti: Int) {
+        val t = tipos[ti]
+        title = "🏭 ${t.nombre}"
+        val col = columna()
+        col.addView(texto("Paredes — toca una para cambiar cantidad, nombre u orden", 14f, true))
+        t.paredes.forEachIndexed { pi, p ->
+            col.addView(fila("${p.nombre}\n${p.cantidad} singularidades",
+                { menuPared(ti, pi) }) { menuPared(ti, pi) })
+        }
+        col.addView(boton("＋ Agregar pared") { agregarPared(ti) })
+        col.addView(espacio(16))
+        col.addView(boton("← Volver a tipos") { tipoActual = -1; render() })
+        setContentView(scroll(col))
+    }
+
+    /** Guarda la configuración del evento actual como plantilla de caldera. */
+    private fun guardarComoPlantilla() {
+        val sugerido = prefs.getString("caldera_$evento", null) ?: ""
+        dialogoTexto("Nombre de la caldera", sugerido) { n0 ->
+            val n = limpiar(n0)
+            val hacer = {
+                prefs.edit().putString("tpl_$n", aJson(tipos)).putString("caldera_$evento", n).apply()
+                guardarCalderas(calderas() + n)
+                aviso("Caldera \"$n\" guardada")
+                render()
+            }
+            if (n in calderas()) confirmar("Ya existe \"$n\". ¿Reemplazarla con esta configuración?") { hacer() }
+            else hacer()
+        }
+    }
+
     // ---------- Notas en terreno (mediciones de espesor) ----------
 
     data class Registro(val num: Int, val fecha: Long, var valor: String, var nota: String, val foto: String)
@@ -608,7 +797,7 @@ class MainActivity : AppCompatActivity() {
             enTerreno = true; render()
         }
         val crear = {
-            dialogoTexto("Nombre del evento (ej. PGP Santa Fe 2026)", "") { irA(limpiar(it)) }
+            crearEvento { irA(it) }
         }
         if (existentes.isEmpty()) {
             AlertDialog.Builder(this).setTitle("Notas en terreno")
