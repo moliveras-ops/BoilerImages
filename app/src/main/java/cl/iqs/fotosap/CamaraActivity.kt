@@ -301,9 +301,14 @@ class CamaraActivity : AppCompatActivity() {
         val g = nombres.count { it.contains("_general_") && !it.contains("_marcada") }
         val d = nombres.count { it.contains("_detalle_") && !it.contains("_marcada") }
         txtConteo.text = "Generales: $g · Detalles: $d" + if (fotosTomadas > 0) "   ·   $fotosTomadas en esta sesión" else ""
-        btnAnterior.text = if (indice > 0) "‹  ${titulos[indice - 1]}" else "—"
-        btnSiguiente.text = if (indice < rutas.size - 1) "${titulos[indice + 1]}  ›" else "—"
-        btnAnterior.textSize = 14f; btnSiguiente.textSize = 14f
+        // solo el código; si el salto cambia de pared, se agrega la pared (en otra línea)
+        fun etiqueta(j: Int): String {
+            val pared = titulos[j].substringAfter(" · ")
+            return if (pared == titulos[indice].substringAfter(" · ")) codigos[j] else "${codigos[j]}\n$pared"
+        }
+        btnAnterior.text = if (indice > 0) "‹  ${etiqueta(indice - 1)}" else "—"
+        btnSiguiente.text = if (indice < rutas.size - 1) "${etiqueta(indice + 1)}  ›" else "—"
+        for (b in listOf(btnAnterior, btnSiguiente)) { b.maxLines = 2; b.textSize = if (b.text.contains('\n')) 13f else 17f }
         btnAnterior.alpha = if (indice > 0) 1f else 0.35f
         btnSiguiente.alpha = if (indice < rutas.size - 1) 1f else 0.35f
         estiloChip(btnGeneral, modo == "general")
