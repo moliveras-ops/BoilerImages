@@ -378,7 +378,7 @@ class MainActivity : AppCompatActivity() {
                 })
                 setOnClickListener { menuSingularidad(ti, pi, n, info) }
                 layoutParams = GridLayout.LayoutParams().apply {
-                    width = 0; height = dp(72)
+                    width = 0; height = dp(84)
                     columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
                     setMargins(dp(3), dp(3), dp(3), dp(3))
                 }
@@ -1273,7 +1273,7 @@ class MainActivity : AppCompatActivity() {
         prefs.getString("pendMed", null)?.let { runCatching { JSONObject(it) }.getOrNull() }
 
     private fun guardarSesionMed(s: JSONObject?) {
-        if (s == null) { prefs.edit().remove("pendMed").apply(); cacheMed = null }
+        if (s == null) { prefs.edit().remove("pendMed").apply(); cacheMed = null; moviendo = -1 }
         else prefs.edit().putString("pendMed", s.toString()).apply()
     }
 
@@ -1400,12 +1400,9 @@ class MainActivity : AppCompatActivity() {
     /** Toque en un lugar libre de la foto: elegir cómo registrar el valor del nuevo punto. */
     private fun nuevoPunto(x: Float, y: Float) {
         val s = sesionMed() ?: return
-        AlertDialog.Builder(this).setTitle("Punto P${puntosDe(s).size + 1} — ¿cómo registras el valor?")
-            .setItems(arrayOf("📷  Foto del medidor (lee el valor)", "⌨️  Escribir o 🎤 dictar el valor")) { _, w ->
-                prepararPunto(x, y)
-                if (w == 0) fotoMedidor() else dialogoPunto(null, "", "", -1)
-            }
-            .setNegativeButton("Cancelar", null).show()
+        menuGrande("Punto P${puntosDe(s).size + 1} — ¿cómo registras el valor?", listOf(
+            "📷  Foto del medidor (lee el valor)" to { prepararPunto(x, y); fotoMedidor() },
+            "⌨️  Escribir o 🎤 dictar el valor" to { prepararPunto(x, y); dialogoPunto(null, "", "", -1) }))
     }
 
     /** Guarda en la sesión la posición y el número del punto que se está agregando. */
@@ -1493,28 +1490,51 @@ class MainActivity : AppCompatActivity() {
             uriMedidor?.let { runCatching { contentResolver.delete(it, null, null) } }
             fotoMedidor()
         }
-        dlg.show()
+        mostrar(dlg.create())
     }
 
     private fun menuPunto(i: Int) {
         val s = sesionMed() ?: return
         val p = puntosDe(s).getOrNull(i) ?: return
-        AlertDialog.Builder(this).setTitle("Punto P${i + 1}: ${textoValor(p.valor)}")
-            .setItems(arrayOf("Corregir valor o nota", "Eliminar punto")) { _, w ->
-                when (w) {
-                    0 -> dialogoPunto(p.foto.takeIf { it.isNotBlank() }?.let(Uri::parse), p.valor, "", i)
-                    1 -> confirmar("¿Eliminar el punto P${i + 1}?") {
-                        val s2 = sesionMed() ?: return@confirmar
-                        val l = puntosDe(s2)
-                        if (i in l.indices) {
-                            // La foto del medidor se borra al guardar (por si se cancela la edición)
-                            if (l[i].foto.isNotBlank()) s2.put("borrar", (s2.optJSONArray("borrar") ?: JSONArray()).put(l[i].foto))
-                            l.removeAt(i)
-                        }
-                        ponerPuntos(s2, l); guardarSesionMed(s2); render()
+        menuGrande("Punto P${i + 1}: ${textoValor(p.valor)}", listOf(
+            "✏️  Corregir valor o nota" to { dialogoPunto(p.foto.takeIf { it.isNotBlank() }?.let(Uri::parse), p.valor, "", i) },
+            "✋  Mover punto" to { moviendo = i; render(); aviso("Toca la nueva posición de P${i + 1}") },
+            "🗑  Eliminar punto" to {
+                confirmar("¿Eliminar el punto P${i + 1}?") {
+                    val s2 = sesionMed() ?: return@confirmar
+                    val l = puntosDe(s2)
+                    if (i in l.indices) {
+                        // La foto del medidor se borra al guardar (por si se cancela la edición)
+                        if (l[i].foto.isNotBlank()) s2.put("borrar", (s2.optJSONArray("borrar") ?: JSONArray()).put(l[i].foto))
+                        l.removeAt(i)
                     }
+                    ponerPuntos(s2, l); guardarSesionMed(s2); render()
                 }
-            }.show()
+            }))
+    }
+
+    /** Menú con botones grandes (cómodos con guantes). */
+    private fun menuGrande(titulo: String, opciones: List<Pair<String, () -> Unit>>) {
+        val col = columna()
+        val dlg = AlertDialog.Builder(this).setTitle(titulo).setView(scroll(col))
+            .setNegativeButton("Cancelar", null).create()
+        opciones.forEach { (t, f) ->
+            col.addView(boton(t) { dlg.dismiss(); f() }.apply {
+                minHeight = dp(72); textSize = 18f; gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { setMargins(0, dp(4), 0, dp(4)) }
+            })
+        }
+        mostrar(dlg)
+    }
+
+    /** Muestra el diálogo con botones inferiores más grandes. */
+    private fun mostrar(dlg: AlertDialog): AlertDialog {
+        dlg.show()
+        for (b in listOf(AlertDialog.BUTTON_POSITIVE, AlertDialog.BUTTON_NEGATIVE, AlertDialog.BUTTON_NEUTRAL)) {
+            dlg.getButton(b)?.apply { textSize = 17f; minHeight = dp(60); minWidth = dp(88) }
+        }
+        return dlg
     }
 
     private fun descartarMedicion() {
@@ -1555,8 +1575,11 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), dp(8), dp(8), dp(8))
         }
-        col.addView(texto(if (puntos.isEmpty()) "Toca en la foto el punto donde mediste."
-                          else "Toca otro punto para agregarlo, o un punto marcado para corregirlo.", 13f, true))
+        col.addView(texto(when {
+            moviendo >= 0 -> "Toca la nueva posición de P${moviendo + 1}"
+            puntos.isEmpty() -> "Toca en la foto el punto donde mediste."
+            else -> "Toca un lugar libre = nuevo punto · Toca un punto = menú · Arrastra un punto = moverlo"
+        }, 15f, true).apply { if (moviendo >= 0) setTextColor(Color.parseColor("#FF6D00")) })
         if (bmp != null) {
             col.addView(VistaPuntos(bmp, puntos).apply {
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
@@ -1568,13 +1591,17 @@ class MainActivity : AppCompatActivity() {
         }
         val resumen = if (puntos.isEmpty()) "Sin puntos todavía"
             else puntos.mapIndexed { i, p -> "P${i + 1}: ${textoValor(p.valor)}" }.joinToString(" · ")
-        col.addView(texto(resumen, 13f, true))
+        col.addView(texto(resumen, 15f, true))
         val filaBotones = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        filaBotones.addView(boton("✕ Salir") { descartarMedicion() }.apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        filaBotones.addView(boton(if (moviendo >= 0) "✕ Cancelar mover" else "✕ Salir") {
+            if (moviendo >= 0) { moviendo = -1; render() } else descartarMedicion()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, dp(76), 1f).apply { marginEnd = dp(6) }
+            textSize = 18f
         })
         filaBotones.addView(boton("💾 Guardar (${puntos.size})") { guardarMedicion() }.apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = LinearLayout.LayoutParams(0, dp(76), 1f)
+            textSize = 18f
             setBackgroundColor(Color.parseColor("#2E7D32")); setTextColor(Color.WHITE)
         })
         col.addView(filaBotones)
@@ -1583,28 +1610,101 @@ class MainActivity : AppCompatActivity() {
 
     private fun textoValor(v: String) = if (v.isBlank()) "—" else "${v.replace('.', ',')} mm"
 
-    /** Muestra la foto y los puntos; un toque agrega un punto o abre uno existente. */
-    private inner class VistaPuntos(val bmp: Bitmap, val puntos: List<Punto>) : View(this@MainActivity) {
+    /**
+     * Foto con los puntos. Pensada para usar con guantes: zona de toque grande alrededor de cada
+     * punto y de su etiqueta. Tocar un lugar libre agrega un punto; tocar un punto abre su menú;
+     * mantener y arrastrar un punto lo mueve (aparece una lupa para ubicarlo con precisión).
+     */
+    private inner class VistaPuntos(val bmp: Bitmap, val puntos: MutableList<Punto>) : View(this@MainActivity) {
         private val dst = RectF()
+        private var cajas: List<RectF> = emptyList()
+        private var arrastre = -1
+        private var movido = false
+        private var x0 = 0f
+        private var y0 = 0f
 
         override fun onDraw(c: Canvas) {
             val esc = minOf(width / bmp.width.toFloat(), height / bmp.height.toFloat())
             val w = bmp.width * esc; val h = bmp.height * esc
             dst.set((width - w) / 2, (height - h) / 2, (width + w) / 2, (height + h) / 2)
             c.drawBitmap(bmp, null, dst, null)
-            dibujarPuntos(c, dst, puntos)
+            cajas = dibujarPuntos(c, dst, puntos, 1.3f, if (moviendo >= 0) moviendo else arrastre)
+            if (arrastre >= 0 && movido) lupa(c, puntos[arrastre])
         }
 
+        /** Lupa en la esquina superior contraria al dedo, con mira en el punto que se mueve. */
+        private fun lupa(c: Canvas, p: Punto) {
+            val rad = dp(75).toFloat()
+            val px = dst.left + p.x * dst.width()
+            val cx = if (px < width / 2f) width - rad - dp(8) else rad + dp(8)
+            val cy = rad + dp(8)
+            val zoom = 2.5f
+            val escala = dst.width() / bmp.width
+            val medio = rad / (escala * zoom)
+            val bx = p.x * bmp.width; val by = p.y * bmp.height
+            val src = android.graphics.Rect((bx - medio).toInt(), (by - medio).toInt(), (bx + medio).toInt(), (by + medio).toInt())
+            c.save()
+            val camino = android.graphics.Path().apply { addCircle(cx, cy, rad, android.graphics.Path.Direction.CW) }
+            c.clipPath(camino)
+            c.drawColor(Color.BLACK)
+            c.drawBitmap(bmp, src, RectF(cx - rad, cy - rad, cx + rad, cy + rad), null)
+            c.restore()
+            val pz = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = dp(3).toFloat(); color = Color.parseColor("#FFEB3B") }
+            c.drawCircle(cx, cy, rad, pz)
+            pz.strokeWidth = dp(2).toFloat()
+            c.drawLine(cx - dp(18), cy, cx - dp(5), cy, pz); c.drawLine(cx + dp(5), cy, cx + dp(18), cy, pz)
+            c.drawLine(cx, cy - dp(18), cx, cy - dp(5), pz); c.drawLine(cx, cy + dp(5), cx, cy + dp(18), pz)
+        }
+
+        private fun puntoEn(x: Float, y: Float): Int {
+            val radio = dp(44).toFloat()
+            var mejor = -1; var dMin = Double.MAX_VALUE
+            puntos.forEachIndexed { i, p ->
+                val d = Math.hypot((dst.left + p.x * dst.width() - x).toDouble(), (dst.top + p.y * dst.height() - y).toDouble())
+                if (d < radio && d < dMin) { dMin = d; mejor = i }
+            }
+            if (mejor >= 0) return mejor
+            return cajas.indexOfFirst { RectF(it).apply { inset(-dp(10).toFloat(), -dp(10).toFloat()) }.contains(x, y) }
+        }
+
+        private fun aImagen(x: Float, y: Float) =
+            ((x - dst.left) / dst.width()).coerceIn(0f, 1f) to ((y - dst.top) / dst.height()).coerceIn(0f, 1f)
+
         override fun onTouchEvent(e: MotionEvent): Boolean {
-            if (e.action == MotionEvent.ACTION_UP && dst.contains(e.x, e.y)) {
-                val radio = dp(28).toFloat()
-                val cerca = puntos.indexOfFirst {
-                    Math.hypot((dst.left + it.x * dst.width() - e.x).toDouble(),
-                               (dst.top + it.y * dst.height() - e.y).toDouble()) < radio
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    x0 = e.x; y0 = e.y; movido = false
+                    arrastre = if (moviendo >= 0) -1 else puntoEn(e.x, e.y)
                 }
-                performClick()
-                if (cerca >= 0) menuPunto(cerca)
-                else nuevoPunto((e.x - dst.left) / dst.width(), (e.y - dst.top) / dst.height())
+                MotionEvent.ACTION_MOVE -> if (arrastre >= 0) {
+                    if (!movido && Math.hypot((e.x - x0).toDouble(), (e.y - y0).toDouble()) > dp(14)) movido = true
+                    if (movido) {
+                        // El punto mantiene su distancia al dedo, para que el guante no lo tape
+                        val (nx, ny) = aImagen(e.x, e.y)
+                        puntos[arrastre].x = nx; puntos[arrastre].y = ny
+                        invalidate()
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    performClick()
+                    val i = arrastre
+                    arrastre = -1
+                    when {
+                        i >= 0 && movido -> moverPunto(i, puntos[i].x, puntos[i].y)
+                        i >= 0 -> menuPunto(i)
+                        moviendo >= 0 && dst.contains(e.x, e.y) -> {
+                            val (nx, ny) = aImagen(e.x, e.y)
+                            val m = moviendo; moviendo = -1
+                            moverPunto(m, nx, ny)
+                        }
+                        dst.contains(e.x, e.y) -> {
+                            val (nx, ny) = aImagen(e.x, e.y)
+                            nuevoPunto(nx, ny)
+                        }
+                    }
+                    invalidate()
+                }
+                MotionEvent.ACTION_CANCEL -> { arrastre = -1; render() }
             }
             return true
         }
@@ -1612,16 +1712,34 @@ class MainActivity : AppCompatActivity() {
         override fun performClick(): Boolean = super.performClick()
     }
 
-    /** Dibuja cada punto (círculo con mira) y una etiqueta "P1: 12,45 mm" en el rectángulo de la foto. */
-    private fun dibujarPuntos(c: Canvas, r: RectF, puntos: List<Punto>) {
-        val u = minOf(r.width(), r.height()) / 360f
+    /** Punto que se está reubicando desde el menú ("Mover punto"): el próximo toque lo coloca. */
+    private var moviendo = -1
+
+    private fun moverPunto(i: Int, x: Float, y: Float) {
+        val s = sesionMed() ?: return
+        val l = puntosDe(s)
+        if (i in l.indices) { l[i].x = x; l[i].y = y }
+        ponerPuntos(s, l); guardarSesionMed(s)
+        aviso("P${i + 1} movido")
+        render()
+    }
+
+    /**
+     * Dibuja cada punto (círculo con mira) y una etiqueta "P1: 12,45 mm". [escala] agranda las marcas
+     * en pantalla; [resaltado] dibuja ese punto en naranjo. Devuelve los rectángulos de las etiquetas.
+     */
+    private fun dibujarPuntos(c: Canvas, r: RectF, puntos: List<Punto>, escala: Float = 1f, resaltado: Int = -1): List<RectF> {
+        val cajas = mutableListOf<RectF>()
+        val u = minOf(r.width(), r.height()) / 360f * escala
         val amarillo = Color.parseColor("#FFEB3B")
         val linea = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.8f * u; color = amarillo }
         val sombra = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 4f * u; color = Color.BLACK }
         val letra = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 15f * u; typeface = Typeface.DEFAULT_BOLD }
         val fondo = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(215, 0, 0, 0) }
         val fm = letra.fontMetrics
+        val naranjo = Color.parseColor("#FF6D00")
         puntos.forEachIndexed { i, p ->
+            linea.color = if (i == resaltado) naranjo else amarillo
             val cx = r.left + p.x * r.width()
             val cy = r.top + p.y * r.height()
             val rad = 8f * u
@@ -1649,7 +1767,9 @@ class MainActivity : AppCompatActivity() {
             c.drawRoundRect(caja, 3f * u, 3f * u, fondo)
             c.drawRoundRect(caja, 3f * u, 3f * u, linea)
             c.drawText(txt, caja.left + pad, caja.top + pad - fm.ascent, letra)
+            cajas.add(caja)
         }
+        return cajas
     }
 
     private fun guardarMedicion() {
@@ -1774,14 +1894,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun menuMedicion(m: JSONObject) {
-        AlertDialog.Builder(this).setTitle(nombreMedicion(m))
-            .setItems(arrayOf("Ver foto con espesores", "Editar puntos", "Eliminar medición")) { _, w ->
-                when (w) {
-                    0 -> verMedicion(m)
-                    1 -> editarMedicion(m)
-                    2 -> confirmar("¿Eliminar ${nombreMedicion(m)}, su foto y sus lecturas?") { eliminarMedicion(m) }
-                }
-            }.show()
+        menuGrande(nombreMedicion(m), listOf(
+            "🖼  Ver foto con espesores" to { verMedicion(m) },
+            "✏️  Editar puntos" to { editarMedicion(m) },
+            "🗑  Eliminar medición" to { confirmar("¿Eliminar ${nombreMedicion(m)}, su foto y sus lecturas?") { eliminarMedicion(m) } }))
     }
 
     private fun editarMedicion(m: JSONObject) {
@@ -1836,7 +1952,7 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(Color.parseColor("#14202B"))
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
-        fila.addView(boton("✎") { menuMedicion(m) }.apply { layoutParams = LinearLayout.LayoutParams(dp(56), dp(56)) })
+        fila.addView(boton("✎") { menuMedicion(m) }.apply { layoutParams = LinearLayout.LayoutParams(dp(72), dp(72)); textSize = 20f })
         return fila
     }
 
@@ -1960,11 +2076,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun confirmar(msg: String, ok: () -> Unit) {
-        AlertDialog.Builder(this)
+        mostrar(AlertDialog.Builder(this)
             .setMessage(msg)
             .setPositiveButton("Sí") { _, _ -> ok() }
             .setNegativeButton("No", null)
-            .show()
+            .create())
     }
 
     private fun aviso(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
@@ -1988,6 +2104,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun boton(s: String, onClick: () -> Unit) = Button(this).apply {
         text = s; isAllCaps = false; gravity = Gravity.CENTER
+        textSize = 16f; minHeight = dp(60)
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -1998,10 +2115,10 @@ class MainActivity : AppCompatActivity() {
         LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(boton(s, onClick).apply {
-                layoutParams = LinearLayout.LayoutParams(0, dp(80), 1f)
+                layoutParams = LinearLayout.LayoutParams(0, dp(88), 1f)
             })
             addView(boton("✎", onEditar).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(64), dp(80))
+                layoutParams = LinearLayout.LayoutParams(dp(76), dp(88))
             })
         }
 
