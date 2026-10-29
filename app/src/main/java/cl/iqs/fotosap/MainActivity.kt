@@ -65,6 +65,7 @@ class MainActivity : AppCompatActivity() {
     private var enEvento = false
     private var enTerreno = false
     private var enCalderas = false
+    private var plantaActual: String? = null
     private var plantilla: String? = null   // caldera que se está editando
     private var tipoActual = -1
     private var paredActual = -1
@@ -100,6 +101,8 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         plantilla = savedInstanceState?.getString("plantilla")
         enCalderas = savedInstanceState?.getBoolean("enCalderas", false) ?: false
+        plantaActual = savedInstanceState?.getString("plantaActual")
+        migrarCalderas()
         cargar()
         enEvento = savedInstanceState?.getBoolean("enEvento", false) ?: false
         enTerreno = savedInstanceState?.getBoolean("enTerreno", false) ?: false
@@ -112,6 +115,7 @@ class MainActivity : AppCompatActivity() {
                     paredActual >= 0 -> { paredActual = -1; render() }
                     tipoActual >= 0 -> { tipoActual = -1; render() }
                     plantilla != null -> cerrarPlantilla()
+                    plantaActual != null -> { plantaActual = null; render() }
                     enCalderas -> { enCalderas = false; render() }
                     enEvento -> { enEvento = false; render() }
                     else -> finish()
@@ -126,6 +130,7 @@ class MainActivity : AppCompatActivity() {
         outState.putBoolean("enEvento", enEvento)
         outState.putBoolean("enTerreno", enTerreno)
         outState.putBoolean("enCalderas", enCalderas)
+        outState.putString("plantaActual", plantaActual)
         outState.putString("plantilla", plantilla)
         outState.putInt("tipo", tipoActual)
         outState.putInt("pared", paredActual)
@@ -216,7 +221,8 @@ class MainActivity : AppCompatActivity() {
             enTerreno -> pantallaTerreno()
             plantilla != null && tipoActual < 0 -> pantallaPlantilla()
             plantilla != null -> pantallaPlantillaParedes(tipoActual)
-            enCalderas -> pantallaCalderas()
+            enCalderas && plantaActual != null -> pantallaPlanta(plantaActual!!)
+            enCalderas -> pantallaPlantas()
             !enEvento -> pantallaEventos()
             tipoActual < 0 -> pantallaTipos()
             paredActual < 0 -> pantallaTipo(tipoActual)
@@ -250,7 +256,9 @@ class MainActivity : AppCompatActivity() {
         }
         col.addView(boton("＋ Nuevo evento") { nuevoEvento() })
         col.addView(espacio(12))
-        col.addView(boton("🏭  Calderas (plantillas: ${calderas().size})") { enCalderas = true; render() })
+        col.addView(boton("🏭  Plantas y calderas (${plantas().size} plantas · ${calderas().size} calderas)") {
+            enCalderas = true; plantaActual = null; render()
+        })
         col.addView(espacio(20))
         col.addView(texto("Carpeta en el teléfono:\nAlmacenamiento interno > $raiz", 13f))
         setContentView(scroll(col))
@@ -393,7 +401,7 @@ class MainActivity : AppCompatActivity() {
     private fun abrirEvento(nombre: String) {
         evento = nombre
         guardarEventos(eventosGuardados() + nombre)
-        plantilla = null; enCalderas = false
+        plantilla = null; enCalderas = false; plantaActual = null
         cargar()
         enEvento = true; tipoActual = -1; paredActual = -1
         render()
@@ -617,71 +625,107 @@ class MainActivity : AppCompatActivity() {
             if (hay) sb.toString().trim() else "")
     }
 
-    // ---------- Calderas (plantillas) ----------
+    // ---------- Plantas y calderas (plantillas) ----------
+    // Cada caldera se identifica como "Planta — Caldera" y guarda su configuración en tpl_<id>.
 
-    private fun calderas(): MutableList<String> {
+    private val SEP = " — "
+    private fun idCaldera(planta: String, caldera: String) = "$planta$SEP$caldera"
+    private fun plantaDe(id: String) = id.substringBefore(SEP)
+    private fun calderaDe(id: String) = id.substringAfter(SEP)
+
+    private fun listaPrefs(clave: String): MutableList<String> {
         val l = mutableListOf<String>()
         runCatching {
-            val arr = JSONArray(prefs.getString("calderas", "[]"))
+            val arr = JSONArray(prefs.getString(clave, "[]"))
             for (i in 0 until arr.length()) l.add(arr.getString(i))
         }
         return l
     }
 
-    private fun guardarCalderas(l: List<String>) {
+    private fun guardarListaPrefs(clave: String, l: List<String>) {
         val arr = JSONArray(); l.distinct().forEach { arr.put(it) }
-        prefs.edit().putString("calderas", arr.toString()).apply()
+        prefs.edit().putString(clave, arr.toString()).apply()
     }
 
-    private fun resumenPlantilla(nombre: String): String {
-        val l = desdeJson(prefs.getString("tpl_$nombre", null)) ?: return ""
+    private fun plantas() = listaPrefs("plantas")
+    private fun calderas() = listaPrefs("calderas")
+    private fun calderasDe(planta: String) = calderas().filter { plantaDe(it) == planta }
+
+    /** Calderas creadas en la versión anterior (sin planta) pasan a la planta "General". */
+    private fun migrarCalderas() {
+        val viejas = calderas().filter { !it.contains(SEP) }
+        if (viejas.isEmpty()) return
+        val ed = prefs.edit()
+        val nuevas = calderas().map { c ->
+            if (c.contains(SEP)) c else {
+                val id = idCaldera("General", c)
+                ed.putString("tpl_$id", prefs.getString("tpl_$c", null)).remove("tpl_$c")
+                id
+            }
+        }
+        ed.apply()
+        guardarListaPrefs("calderas", nuevas)
+        guardarListaPrefs("plantas", plantas() + "General")
+    }
+
+    private fun resumenPlantilla(id: String): String {
+        val l = desdeJson(prefs.getString("tpl_$id", null)) ?: return ""
         return "${l.size} tipos · ${l.sumOf { t -> t.paredes.sumOf { it.cantidad } }} singularidades"
     }
 
-    /** Pide nombre del evento y, si hay calderas, cuál usar. Llama [luego] con el nombre. */
+    /** Nombre del evento → planta → caldera. Llama [luego] con el nombre del evento. */
     private fun crearEvento(luego: (String) -> Unit) {
-        dialogoTexto("Nombre del evento (ej. PGP Santa Fe 2026)", "") { n0 ->
+        dialogoTexto("Nombre del evento (ej. PGP Octubre 2026)", "") { n0 ->
             val nombre = limpiar(n0)
-            val lista = calderas()
-            val aplicar: (String?) -> Unit = { tpl ->
+            val aplicar: (String?) -> Unit = { id ->
                 if (!prefs.contains("tipos_$nombre")) {
-                    val json = tpl?.let { prefs.getString("tpl_$it", null) }
+                    val json = id?.let { prefs.getString("tpl_$it", null) }
                         ?: prefs.getString("tipos", null) ?: aJson(porDefecto())
                     val ed = prefs.edit().putString("tipos_$nombre", json)
-                    if (tpl != null) ed.putString("caldera_$nombre", tpl)
+                    if (id != null) ed.putString("caldera_$nombre", id)
                     ed.apply()
                 }
                 luego(nombre)
             }
-            if (lista.isEmpty() || prefs.contains("tipos_$nombre")) aplicar(null)
-            else AlertDialog.Builder(this)
-                .setTitle("¿Qué caldera es?")
-                .setItems((lista.map { "🏭 $it" } + "Sin plantilla (configuración por defecto)").toTypedArray()) { _, i ->
-                    aplicar(lista.getOrNull(i))
+            val conCalderas = plantas().filter { calderasDe(it).isNotEmpty() }
+            if (conCalderas.isEmpty() || prefs.contains("tipos_$nombre")) { aplicar(null); return@dialogoTexto }
+
+            val elegirCaldera: (String) -> Unit = { planta ->
+                val lista = calderasDe(planta)
+                if (lista.size == 1) aplicar(lista[0])
+                else AlertDialog.Builder(this)
+                    .setTitle("$planta — ¿qué caldera?")
+                    .setItems(lista.map { "🔥 ${calderaDe(it)}" }.toTypedArray()) { _, i -> aplicar(lista[i]) }
+                    .setCancelable(false).show()
+            }
+            AlertDialog.Builder(this)
+                .setTitle("¿En qué planta?")
+                .setItems((conCalderas.map { "🏭 $it" } + "Sin plantilla (configuración por defecto)").toTypedArray()) { _, i ->
+                    conCalderas.getOrNull(i)?.let(elegirCaldera) ?: aplicar(null)
                 }
                 .setCancelable(false)
                 .show()
         }
     }
 
-    private fun pantallaCalderas() {
-        title = "Calderas (plantillas)"
+    private fun pantallaPlantas() {
+        title = "Plantas y calderas"
         val col = columna()
-        col.addView(texto("Define cada caldera una sola vez. Al crear un evento eliges la caldera " +
-                          "y se cargan sus tipos, paredes y cantidades.", 13f))
+        col.addView(texto("Crea cada planta y sus calderas una sola vez. Al crear un evento eliges " +
+                          "planta y caldera, y se cargan sus tipos, paredes y cantidades.", 13f))
         col.addView(espacio(8))
-        val lista = calderas()
-        if (lista.isEmpty()) col.addView(texto("Aún no hay calderas.", 13f))
-        for (c in lista) {
-            col.addView(fila("🏭 $c\n${resumenPlantilla(c)}", { abrirPlantilla(c) }) { menuCaldera(c) })
+        val lista = plantas()
+        if (lista.isEmpty()) col.addView(texto("Aún no hay plantas.", 13f))
+        for (pl in lista) {
+            val n = calderasDe(pl).size
+            col.addView(fila("🏭 $pl\n$n caldera(s)", { plantaActual = pl; render() }) { menuPlanta(pl) })
         }
-        col.addView(boton("＋ Nueva caldera") {
-            dialogoTexto("Nombre de la caldera (ej. Caldera Recuperadora Valdivia)", "") { n0 ->
+        col.addView(boton("＋ Nueva planta") {
+            dialogoTexto("Nombre de la planta (ej. Planta Valdivia)", "") { n0 ->
                 val n = limpiar(n0)
-                if (n in calderas()) { aviso("Ya existe una caldera con ese nombre"); return@dialogoTexto }
-                prefs.edit().putString("tpl_$n", aJson(porDefecto())).apply()
-                guardarCalderas(calderas() + n)
-                abrirPlantilla(n)
+                if (n in plantas()) { aviso("Ya existe esa planta"); return@dialogoTexto }
+                guardarListaPrefs("plantas", plantas() + n)
+                plantaActual = n; render()
             }
         })
         col.addView(espacio(16))
@@ -689,38 +733,97 @@ class MainActivity : AppCompatActivity() {
         setContentView(scroll(col))
     }
 
-    private fun menuCaldera(c: String) {
-        AlertDialog.Builder(this).setTitle(c)
-            .setItems(arrayOf("Editar", "Renombrar", "Duplicar", "Eliminar")) { _, w ->
+    private fun menuPlanta(pl: String) {
+        AlertDialog.Builder(this).setTitle(pl)
+            .setItems(arrayOf("Abrir", "Renombrar", "Eliminar")) { _, w ->
                 when (w) {
-                    0 -> abrirPlantilla(c)
-                    1 -> dialogoTexto("Nuevo nombre", c) { n0 ->
+                    0 -> { plantaActual = pl; render() }
+                    1 -> dialogoTexto("Nuevo nombre", pl) { n0 ->
                         val n = limpiar(n0)
-                        if (n == c) return@dialogoTexto
-                        if (n in calderas()) { aviso("Ya existe una caldera con ese nombre"); return@dialogoTexto }
-                        val json = prefs.getString("tpl_$c", null)
-                        prefs.edit().putString("tpl_$n", json).remove("tpl_$c").apply()
-                        guardarCalderas(calderas().map { if (it == c) n else it })
+                        if (n == pl) return@dialogoTexto
+                        if (n in plantas()) { aviso("Ya existe esa planta"); return@dialogoTexto }
+                        val ed = prefs.edit()
+                        val nuevas = calderas().map { id ->
+                            if (plantaDe(id) != pl) id else {
+                                val nid = idCaldera(n, calderaDe(id))
+                                ed.putString("tpl_$nid", prefs.getString("tpl_$id", null)).remove("tpl_$id")
+                                nid
+                            }
+                        }
+                        ed.apply()
+                        guardarListaPrefs("calderas", nuevas)
+                        guardarListaPrefs("plantas", plantas().map { if (it == pl) n else it })
                         render()
                     }
-                    2 -> dialogoTexto("Nombre de la copia", "$c (copia)") { n0 ->
-                        val n = limpiar(n0)
-                        if (n in calderas()) { aviso("Ya existe una caldera con ese nombre"); return@dialogoTexto }
-                        prefs.edit().putString("tpl_$n", prefs.getString("tpl_$c", null)).apply()
-                        guardarCalderas(calderas() + n)
-                        render()
-                    }
-                    3 -> confirmar("¿Eliminar la caldera \"$c\"? Los eventos ya creados no cambian.") {
-                        prefs.edit().remove("tpl_$c").apply()
-                        guardarCalderas(calderas().filter { it != c })
+                    2 -> confirmar("¿Eliminar la planta \"$pl\" y sus ${calderasDe(pl).size} caldera(s)? " +
+                                   "Los eventos ya creados no cambian.") {
+                        val ed = prefs.edit()
+                        calderasDe(pl).forEach { ed.remove("tpl_$it") }
+                        ed.apply()
+                        guardarListaPrefs("calderas", calderas().filter { plantaDe(it) != pl })
+                        guardarListaPrefs("plantas", plantas().filter { it != pl })
                         render()
                     }
                 }
             }.show()
     }
 
-    private fun abrirPlantilla(c: String) {
-        plantilla = c; enCalderas = true; tipoActual = -1; paredActual = -1
+    private fun pantallaPlanta(pl: String) {
+        title = "🏭 $pl"
+        val col = columna()
+        col.addView(texto("Calderas  (✎ para renombrar, duplicar o eliminar)", 14f, true))
+        val lista = calderasDe(pl)
+        if (lista.isEmpty()) col.addView(texto("Aún no hay calderas en esta planta.", 13f))
+        for (id in lista) {
+            col.addView(fila("🔥 ${calderaDe(id)}\n${resumenPlantilla(id)}", { abrirPlantilla(id) }) { menuCaldera(id) })
+        }
+        col.addView(boton("＋ Nueva caldera") {
+            dialogoTexto("Nombre de la caldera (ej. Caldera Recuperadora)", "") { n0 ->
+                val id = idCaldera(pl, limpiar(n0))
+                if (id in calderas()) { aviso("Ya existe esa caldera"); return@dialogoTexto }
+                prefs.edit().putString("tpl_$id", aJson(porDefecto())).apply()
+                guardarListaPrefs("calderas", calderas() + id)
+                abrirPlantilla(id)
+            }
+        })
+        col.addView(espacio(16))
+        col.addView(boton("← Volver a plantas") { plantaActual = null; render() })
+        setContentView(scroll(col))
+    }
+
+    private fun menuCaldera(id: String) {
+        val pl = plantaDe(id)
+        AlertDialog.Builder(this).setTitle(calderaDe(id))
+            .setItems(arrayOf("Editar", "Renombrar", "Duplicar", "Eliminar")) { _, w ->
+                when (w) {
+                    0 -> abrirPlantilla(id)
+                    1 -> dialogoTexto("Nuevo nombre", calderaDe(id)) { n0 ->
+                        val nid = idCaldera(pl, limpiar(n0))
+                        if (nid == id) return@dialogoTexto
+                        if (nid in calderas()) { aviso("Ya existe esa caldera"); return@dialogoTexto }
+                        prefs.edit().putString("tpl_$nid", prefs.getString("tpl_$id", null)).remove("tpl_$id").apply()
+                        guardarListaPrefs("calderas", calderas().map { if (it == id) nid else it })
+                        render()
+                    }
+                    2 -> dialogoTexto("Nombre de la copia", "${calderaDe(id)} (copia)") { n0 ->
+                        val nid = idCaldera(pl, limpiar(n0))
+                        if (nid in calderas()) { aviso("Ya existe esa caldera"); return@dialogoTexto }
+                        prefs.edit().putString("tpl_$nid", prefs.getString("tpl_$id", null)).apply()
+                        guardarListaPrefs("calderas", calderas() + nid)
+                        render()
+                    }
+                    3 -> confirmar("¿Eliminar la caldera \"${calderaDe(id)}\"? Los eventos ya creados no cambian.") {
+                        prefs.edit().remove("tpl_$id").apply()
+                        guardarListaPrefs("calderas", calderas().filter { it != id })
+                        render()
+                    }
+                }
+            }.show()
+    }
+
+    private fun abrirPlantilla(id: String) {
+        plantilla = id; enCalderas = true; plantaActual = plantaDe(id)
+        tipoActual = -1; paredActual = -1
         cargar(); render()
     }
 
@@ -730,9 +833,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun pantallaPlantilla() {
-        title = "🏭 $plantilla"
+        title = "🔥 ${plantilla?.let { calderaDe(it) }}"
         val col = columna()
-        col.addView(texto("Tipos de singularidad  (✎ para editar)", 14f, true))
+        col.addView(texto("${plantilla?.let { plantaDe(it) }} — tipos de singularidad  (✎ para editar)", 14f, true))
         tipos.forEachIndexed { i, t ->
             col.addView(fila("${t.nombre} (${t.prefijo})\n${t.paredes.size} paredes · " +
                              "${t.paredes.sumOf { it.cantidad }} singularidades",
@@ -740,13 +843,13 @@ class MainActivity : AppCompatActivity() {
         }
         col.addView(boton("＋ Agregar tipo") { agregarTipo() })
         col.addView(espacio(16))
-        col.addView(boton("✓ Listo — volver a calderas") { cerrarPlantilla() })
+        col.addView(boton("✓ Listo — volver a la planta") { cerrarPlantilla() })
         setContentView(scroll(col))
     }
 
     private fun pantallaPlantillaParedes(ti: Int) {
         val t = tipos[ti]
-        title = "🏭 ${t.nombre}"
+        title = "🔥 ${t.nombre}"
         val col = columna()
         col.addView(texto("Paredes — toca una para cambiar cantidad, nombre u orden", 14f, true))
         t.paredes.forEachIndexed { pi, p ->
@@ -759,19 +862,23 @@ class MainActivity : AppCompatActivity() {
         setContentView(scroll(col))
     }
 
-    /** Guarda la configuración del evento actual como plantilla de caldera. */
+    /** Guarda la configuración del evento actual como caldera de una planta. */
     private fun guardarComoPlantilla() {
-        val sugerido = prefs.getString("caldera_$evento", null) ?: ""
-        dialogoTexto("Nombre de la caldera", sugerido) { n0 ->
-            val n = limpiar(n0)
-            val hacer = {
-                prefs.edit().putString("tpl_$n", aJson(tipos)).putString("caldera_$evento", n).apply()
-                guardarCalderas(calderas() + n)
-                aviso("Caldera \"$n\" guardada")
-                render()
+        val previo = prefs.getString("caldera_$evento", null)
+        dialogoTexto("Planta (ej. Planta Valdivia)", previo?.let { plantaDe(it) } ?: "") { p0 ->
+            val pl = limpiar(p0)
+            dialogoTexto("Caldera (ej. Caldera Recuperadora)", previo?.let { calderaDe(it) } ?: "") { c0 ->
+                val id = idCaldera(pl, limpiar(c0))
+                val hacer = {
+                    prefs.edit().putString("tpl_$id", aJson(tipos)).putString("caldera_$evento", id).apply()
+                    guardarListaPrefs("plantas", plantas() + pl)
+                    guardarListaPrefs("calderas", calderas() + id)
+                    aviso("Guardada: $id")
+                    render()
+                }
+                if (id in calderas()) confirmar("Ya existe \"$id\". ¿Reemplazarla con esta configuración?") { hacer() }
+                else hacer()
             }
-            if (n in calderas()) confirmar("Ya existe \"$n\". ¿Reemplazarla con esta configuración?") { hacer() }
-            else hacer()
         }
     }
 
