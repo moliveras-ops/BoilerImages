@@ -76,7 +76,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().remove("pendUri").apply()
 
         if (modo == "terreno") {
-            enEvento = true; enTerreno = true
+            enTerreno = true
             render()
             if (ok && uri != null) procesarRegistro(uri, n)
             else uri?.let { runCatching { contentResolver.delete(it, null, null) } }
@@ -191,8 +191,8 @@ class MainActivity : AppCompatActivity() {
         if (tipoActual !in tipos.indices) { tipoActual = -1; paredActual = -1 }
         if (tipoActual >= 0 && paredActual !in tipos[tipoActual].paredes.indices) paredActual = -1
         when {
-            !enEvento -> pantallaEventos()
             enTerreno -> pantallaTerreno()
+            !enEvento -> pantallaEventos()
             tipoActual < 0 -> pantallaTipos()
             paredActual < 0 -> pantallaTipo(tipoActual)
             else -> pantallaPared(tipoActual, paredActual)
@@ -202,6 +202,10 @@ class MainActivity : AppCompatActivity() {
     private fun pantallaEventos() {
         title = "BoilerImage — Eventos"
         val col = columna()
+        col.addView(boton("📏  Notas en terreno (${registros().size})") {
+            enTerreno = true; render()
+        }.apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
+        col.addView(espacio(16))
         col.addView(texto("Eventos en el teléfono  (✎ para eliminar)", 14f, true))
 
         val resumen = resumenEventos()
@@ -226,10 +230,6 @@ class MainActivity : AppCompatActivity() {
     private fun pantallaTipos() {
         title = evento
         val col = columna()
-        col.addView(boton("📏  Notas en terreno (${registros().size})") {
-            enTerreno = true; render()
-        }.apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
-        col.addView(espacio(16))
         col.addView(texto("Tipos de singularidad  (✎ para editar)", 14f, true))
 
         val conteo = contarFotos()
@@ -351,7 +351,7 @@ class MainActivity : AppCompatActivity() {
             while (c.moveToNext()) {
                 val ruta = c.getString(0) ?: continue
                 val ev = ruta.removePrefix("$raiz/").substringBefore("/")
-                if (ev.isEmpty()) continue
+                if (ev.isEmpty() || ev == "Notas en terreno") continue
                 val f = c.getLong(1)
                 val (n, ult) = res[ev] ?: (0 to 0L)
                 res[ev] = (n + 1) to maxOf(ult, f)
@@ -589,14 +589,14 @@ class MainActivity : AppCompatActivity() {
 
     data class Registro(val num: Int, val fecha: Long, var valor: String, var nota: String, val foto: String)
 
-    private val carpetaTerreno get() = "$raiz/$evento/Notas en terreno/"
+    private val carpetaTerreno get() = "$raiz/Notas en terreno/"
     private val fmtFecha = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault())
     private val fmtHora = SimpleDateFormat("HH:mm", Locale.getDefault())
 
     private fun registros(): MutableList<Registro> {
         val l = mutableListOf<Registro>()
         runCatching {
-            val arr = JSONArray(prefs.getString("terreno_$evento", "[]"))
+            val arr = JSONArray(prefs.getString("terreno", "[]"))
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 l.add(Registro(o.getInt("num"), o.getLong("fecha"), o.optString("valor"),
@@ -612,12 +612,12 @@ class MainActivity : AppCompatActivity() {
             arr.put(JSONObject().put("num", it.num).put("fecha", it.fecha).put("valor", it.valor)
                 .put("nota", it.nota).put("foto", it.foto))
         }
-        prefs.edit().putString("terreno_$evento", arr.toString()).apply()
+        prefs.edit().putString("terreno", arr.toString()).apply()
         exportarCsv(l)
     }
 
     private fun pantallaTerreno() {
-        title = "Notas en terreno — $evento"
+        title = "Notas en terreno"
         val col = columna()
         col.addView(boton("📷  Nuevo registro (foto del medidor)") { nuevoRegistro() }
             .apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
