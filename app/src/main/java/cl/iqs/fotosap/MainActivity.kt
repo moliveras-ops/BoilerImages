@@ -108,6 +108,7 @@ class MainActivity : AppCompatActivity() {
         val pi = prefs.getInt("pendPared", -1)
         val n = prefs.getInt("pendNum", -1)
         prefs.edit().remove("pendUri").apply()
+        android.util.Log.i("BoilerImage", "camara ok=$ok modo=$modo uri=$uri")
 
         if (modo == "medBase" || modo == "medidor") {
             alVolverCamaraMed(modo, ok, uri)
