@@ -54,6 +54,7 @@ class MainActivity : AppCompatActivity() {
 
     // Documents permite guardar fotos y notas .txt en la misma carpeta
     private val raiz = "Documents/BoilerImage"
+    private val MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     private val coleccion: Uri get() = MediaStore.Files.getContentUri("external")
     private val soloImagenes = " AND ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'image/%'"
 
@@ -415,11 +416,7 @@ class MainActivity : AppCompatActivity() {
         }
         col.addView(boton("＋ Agregar tipo") { agregarTipo() })
         col.addView(boton("💾  Guardar como plantilla de caldera") { guardarComoPlantilla() })
-        col.addView(boton("📊  Exportar todas las notas a Excel") {
-            val n = exportarNotas()
-            aviso(if (n == 0) "No hay notas en este evento"
-                  else "Listo: $n notas en $raiz/$evento/Notas $evento.csv")
-        })
+        col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
         col.addView(espacio(16))
         col.addView(boton("← Cambiar evento") { enEvento = false; render() })
         col.addView(espacio(20))
@@ -667,6 +664,41 @@ class MainActivity : AppCompatActivity() {
         col.addView(boton("📐  Medir con realidad aumentada") { dlg.dismiss(); medirRASingularidad(ti, pi, n) })
         col.addView(texto("Ráfaga: la cámara se vuelve a abrir después de cada foto. " +
                           "Presiona Atrás en la cámara para terminar.", 12f))
+        // Saltar a la singularidad anterior / siguiente (pasa a la pared vecina en los extremos)
+        val nav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun destino(d: Int): Pair<Int, Int>? {
+            val m = n + d
+            return when {
+                m in 1..p.cantidad -> pi to m
+                d > 0 && pi + 1 < t.paredes.size -> pi + 1 to 1
+                d < 0 && pi > 0 -> pi - 1 to t.paredes[pi - 1].cantidad
+                else -> null
+            }
+        }
+        fun etiqueta(dst: Pair<Int, Int>) = "%s%02d".format(t.prefijo, dst.second) +
+            if (dst.first != pi) "\n" + t.paredes[dst.first].nombre else ""
+        fun ir(dst: Pair<Int, Int>) {
+            dlg.dismiss()
+            window.decorView.post {
+                if (dst.first != paredActual) { paredActual = dst.first; render() }
+                val c = contarFotos()[carpeta(t, t.paredes[dst.first], dst.second)]
+                menuSingularidad(ti, dst.first, dst.second, c)
+            }
+        }
+        for (d in listOf(-1, 1)) {
+            val dst = destino(d)
+            nav.addView(boton(if (dst == null) "—" else if (d < 0) "‹  ${etiqueta(dst)}" else "${etiqueta(dst)}  ›",
+                              Estilo.PLANO) { dst?.let { ir(it) } }.apply {
+                isEnabled = dst != null; alpha = if (dst == null) 0.35f else 1f
+                gravity = Gravity.CENTER; textSize = 17f
+                setCompoundDrawablesRelative(null, null, null, null)
+                background = fondoRedondeado(C.primarioSuave, 14)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    setMargins(if (d < 0) 0 else dp(5), dp(8), if (d < 0) dp(5) else 0, 0)
+                }
+            })
+        }
+        col.addView(nav)
         dlg.show()
     }
 
@@ -687,44 +719,92 @@ class MainActivity : AppCompatActivity() {
         }
         val orden = listOf("_general", "_detalle", "_espesores", "_RA")
         fun clase(s: String) = orden.indexOfFirst { s.contains(it) }.let { if (it < 0) orden.size else it }
-        fun num(s: String) = Regex("_(\\d+)\\.").find(s)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        fun num(s: String) = Regex("_(?:general|detalle|espesores|RA)_(\\d+)").find(s)?.groupValues?.get(1)?.toIntOrNull() ?: 0
         l.sortWith(compareBy({ clase(it.nombre) }, { num(it.nombre) }, { it.nombre }))
         return l
     }
 
-    /** "AP01_detalle_2.jpg" → "Detalle 2" */
+    /** Clase de foto para los filtros: general, detalle, espesores, RA o marcada. */
+    private fun claseFoto(nombre: String) = when {
+        nombre.contains("_marcada") -> "marcada"
+        nombre.contains("_general") -> "general"
+        nombre.contains("_detalle") -> "detalle"
+        nombre.contains("_espesores") -> "espesores"
+        nombre.contains("_RA") -> "RA"
+        else -> "otra"
+    }
+
+    /** "AP01_detalle_2.jpg" → "Detalle 2"; "AP01_detalle_2_marcada.jpg" → "Detalle 2 (marcada)" */
     private fun etiquetaFoto(nombre: String): String {
-        val s = nombre.substringBeforeLast('.').substringAfter('_').replace('_', ' ')
-        return s.replaceFirstChar { it.uppercase() }
+        val sinExt = nombre.substringBeforeLast('.')
+        val base = sinExt.substringBefore("_marcada")
+        var s = base.substringAfter('_').replace('_', ' ').replaceFirstChar { it.uppercase() }
+        if (sinExt.contains("_marcada")) s += " (marcada)"
+        return s
     }
 
     private fun dialogoPantallaCompleta() =
         android.app.Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
 
-    private fun barraOscura(titulo: String, cerrar: () -> Unit) = LinearLayout(this).apply {
+    private fun barraOscura(titulo: TextView, cerrar: () -> Unit) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
         setBackgroundColor(C.primario); setPadding(dp(16), dp(6), dp(4), dp(6))
-        addView(TextView(context).apply {
-            text = titulo; textSize = 18f; typeface = medio; setTextColor(Color.WHITE); maxLines = 2
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        })
+        titulo.apply { textSize = 17f; typeface = medio; setTextColor(Color.WHITE); maxLines = 2 }
+        addView(titulo, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         addView(botonIcono(R.drawable.ic_cerrar, Color.WHITE) { cerrar() })
     }
 
-    /** Grilla de miniaturas de las fotos de una singularidad. Tocar una la abre en grande. */
+    /** Botón cuadrado de las barras oscuras (ícono arriba, texto abajo). */
+    private fun accionOscura(res: Int, txt: String, color: Int = Color.WHITE, fondo: Int = Color.parseColor("#1C2A3A"),
+                             f: () -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+        background = fondoRedondeado(fondo, 12)
+        isClickable = true; setOnClickListener { f() }
+        addView(ImageView(context).apply { setImageDrawable(icono(res, color, 26)) })
+        addView(TextView(context).apply { text = txt; textSize = 12.5f; setTextColor(color); gravity = Gravity.CENTER; maxLines = 1 })
+        layoutParams = LinearLayout.LayoutParams(0, dp(68), 1f).apply { setMargins(dp(4), dp(4), dp(4), dp(4)) }
+    }
+
+    private fun filaOscura() = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+        setBackgroundColor(C.oscuro); setPadding(dp(4), dp(2), dp(4), dp(2))
+    }
+
+    /** Grilla de miniaturas de las fotos de una singularidad, con filtros por tipo. Tocar una la abre en grande. */
     private fun galeriaFotos(titulo: String, ruta: String) {
         val dlg = dialogoPantallaCompleta()
         val raizV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.oscuro) }
-        raizV.addView(barraOscura(titulo) { dlg.dismiss() })
-        val cont = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(8), dp(8), dp(8), dp(16)) }
+        raizV.addView(barraOscura(TextView(this).apply { text = titulo }) { dlg.dismiss() })
+        val filtros = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(8), dp(8), dp(8), 0) }
+        raizV.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(filtros) })
+        val cont = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(8), dp(4), dp(8), dp(16)) }
         raizV.addView(ScrollView(this).apply { addView(cont) },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         dlg.setContentView(raizV)
         var cambio = false
+        var filtro = "todas"
+        val nombresFiltro = listOf("todas" to "Todas", "general" to "Generales", "detalle" to "Detalles",
+            "espesores" to "Espesores", "RA" to "RA", "marcada" to "Marcadas")
 
         fun llenar() {
-            cont.removeAllViews()
-            val fotos = fotosDe(ruta)
+            cont.removeAllViews(); filtros.removeAllViews()
+            val todas = fotosDe(ruta)
+            val cuenta = todas.groupingBy { claseFoto(it.nombre) }.eachCount()
+            if (filtro != "todas" && (cuenta[filtro] ?: 0) == 0) filtro = "todas"
+            for ((clave, nombre) in nombresFiltro) {
+                val k = if (clave == "todas") todas.size else cuenta[clave] ?: 0
+                if (k == 0 && clave != "todas") continue
+                val activo = clave == filtro
+                filtros.addView(TextView(this).apply {
+                    text = "$nombre ($k)"; textSize = 15f; typeface = medio; gravity = Gravity.CENTER
+                    setTextColor(if (activo) C.tinta else Color.WHITE)
+                    background = fondoRedondeado(if (activo) C.acento else Color.parseColor("#1C2A3A"), 24)
+                    setPadding(dp(18), 0, dp(18), 0); minWidth = dp(72)
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(52)).apply { marginEnd = dp(8) }
+                    isClickable = true; setOnClickListener { filtro = clave; llenar() }
+                })
+            }
+            val fotos = if (filtro == "todas") todas else todas.filter { claseFoto(it.nombre) == filtro }.toMutableList()
             if (fotos.isEmpty()) {
                 cont.addView(TextView(this).apply {
                     text = "Sin fotos"; textSize = 16f; setTextColor(Color.LTGRAY); gravity = Gravity.CENTER
@@ -748,13 +828,12 @@ class MainActivity : AppCompatActivity() {
                     }
                     clipToOutline = true
                     layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(120))
-                    setOnClickListener {
-                        visorFotos(fotos, i) { cambio = true; llenar() }
-                    }
+                    setOnClickListener { visorFotos(fotos, i, ruta) { cambio = true; llenar() } }
                 }
                 celda.addView(iv)
                 celda.addView(TextView(this).apply {
-                    text = etiquetaFoto(f.nombre); textSize = 13f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                    text = etiquetaFoto(f.nombre); textSize = 13f; gravity = Gravity.CENTER
+                    setTextColor(if (claseFoto(f.nombre) == "marcada") C.acento else Color.WHITE)
                     setPadding(0, dp(4), 0, dp(2)); maxLines = 1
                 })
                 grid.addView(celda)
@@ -774,18 +853,18 @@ class MainActivity : AppCompatActivity() {
         dlg.show()
     }
 
-    /** Foto en pantalla completa: deslizar o flechas para cambiar, pellizcar o doble toque para zoom. */
-    private fun visorFotos(fotos: MutableList<FotoInfo>, inicio: Int, alBorrar: () -> Unit) {
+    /**
+     * Foto en pantalla completa: deslizar o flechas para cambiar, pellizcar o doble toque para zoom.
+     * Acciones: marcar (dibujar), cambiar tipo general ↔ detalle, compartir y eliminar.
+     * [alCambiar] se llama cuando se borra, renombra o crea una foto (para refrescar la galería).
+     */
+    private fun visorFotos(fotos: MutableList<FotoInfo>, inicio: Int, ruta: String, alCambiar: () -> Unit) {
         if (fotos.isEmpty()) return
         var i = inicio.coerceIn(0, fotos.size - 1)
         val dlg = dialogoPantallaCompleta()
         val raizV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.BLACK) }
         val tituloV = TextView(this)
-        val barra = barraOscura("") { dlg.dismiss() }
-        (barra.getChildAt(0) as TextView).let { tituloV.layoutParams = it.layoutParams; barra.removeViewAt(0) }
-        tituloV.apply { textSize = 17f; typeface = medio; setTextColor(Color.WHITE); maxLines = 2 }
-        barra.addView(tituloV, 0)
-        raizV.addView(barra)
+        raizV.addView(barraOscura(tituloV) { dlg.dismiss() })
         lateinit var vista: VistaZoom
         var cargaId = 0
 
@@ -809,37 +888,263 @@ class MainActivity : AppCompatActivity() {
         vista = VistaZoom({ mover(1) }, { mover(-1) })
         raizV.addView(vista, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        val acciones = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
-            setBackgroundColor(C.oscuro); setPadding(dp(8), dp(8), dp(8), dp(8))
-        }
-        fun accion(res: Int, txt: String, color: Int = Color.WHITE, f: () -> Unit) = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-            minimumHeight = dp(64)
-            background = fondoRedondeado(Color.parseColor("#1C2A3A"), 12)
-            isClickable = true; setOnClickListener { f() }
-            addView(ImageView(context).apply { setImageDrawable(icono(res, color, 26)) })
-            addView(TextView(context).apply { text = txt; textSize = 12.5f; setTextColor(color); gravity = Gravity.CENTER })
-            layoutParams = LinearLayout.LayoutParams(0, dp(68), 1f).apply { setMargins(dp(4), 0, dp(4), 0) }
-        }
-        acciones.addView(accion(R.drawable.ic_anterior, "Anterior") { mover(-1) })
-        acciones.addView(accion(R.drawable.ic_compartir, "Compartir") { compartir(fotos[i].uri) })
-        acciones.addView(accion(R.drawable.ic_borrar, "Eliminar", Color.parseColor("#FF8A80")) {
+        val fila1 = filaOscura()
+        fila1.addView(accionOscura(R.drawable.ic_anterior, "Anterior") { mover(-1) })
+        fila1.addView(accionOscura(R.drawable.ic_editar, "Marcar", C.tinta, C.acento) {
+            editorMarcas(fotos[i], ruta) { nueva ->
+                fotos.add(i + 1, nueva); i++; alCambiar(); mostrarActual()
+            }
+        })
+        fila1.addView(accionOscura(R.drawable.ic_siguiente, "Siguiente") { mover(1) })
+        val fila2 = filaOscura()
+        fila2.addView(accionOscura(R.drawable.ic_tipo, "Tipo") {
+            cambiarTipoFoto(fotos[i], ruta) { nueva -> fotos[i] = nueva; alCambiar(); mostrarActual() }
+        })
+        fila2.addView(accionOscura(R.drawable.ic_compartir, "Compartir") { compartir(fotos[i].uri) })
+        fila2.addView(accionOscura(R.drawable.ic_borrar, "Eliminar", Color.parseColor("#FF8A80")) {
             val f = fotos[i]
             confirmar("¿Eliminar la foto ${f.nombre}?") {
                 val ok = runCatching { contentResolver.delete(f.uri, null, null) > 0 }.getOrDefault(false)
                 if (!ok) { aviso("No se pudo eliminar la foto"); return@confirmar }
                 fotos.removeAt(i)
-                alBorrar()
+                alCambiar()
                 if (fotos.isEmpty()) dlg.dismiss()
                 else { i = i.coerceAtMost(fotos.size - 1); mostrarActual() }
             }
         })
-        acciones.addView(accion(R.drawable.ic_siguiente, "Siguiente") { mover(1) })
-        raizV.addView(acciones)
+        raizV.addView(fila1)
+        raizV.addView(fila2.apply { setPadding(dp(4), 0, dp(4), dp(8)) })
         dlg.setContentView(raizV)
         dlg.show()
         mostrarActual()
+    }
+
+    private fun renombrar(uri: Uri, nombre: String) = runCatching {
+        contentResolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, nombre) }, null, null) > 0
+    }.getOrDefault(false)
+
+    /** Cambia una foto general a detalle o al revés (renombra el archivo y sus copias marcadas). */
+    private fun cambiarTipoFoto(f: FotoInfo, ruta: String, listo: (FotoInfo) -> Unit) {
+        val m = Regex("^(.+?)_(general|detalle)_(\\d+)\\.jpg$").find(f.nombre)
+        if (m == null) {
+            aviso(if (f.nombre.contains("_marcada")) "Cambia el tipo en la foto original"
+                  else "Solo las fotos generales y de detalle pueden cambiar de tipo")
+            return
+        }
+        val (pre, tipo, _) = m.destructured
+        val otro = if (tipo == "general") "detalle" else "general"
+        val nombreOtro = if (otro == "general") "Foto general" else "Detalle"
+        confirmar("¿Cambiar ${etiquetaFoto(f.nombre)} a $nombreOtro?") {
+            val stemNuevo = "${pre}_${otro}_${libre(ruta, "${pre}_${otro}_%d.jpg")}"
+            if (!renombrar(f.uri, "$stemNuevo.jpg")) { aviso("No se pudo cambiar el tipo"); return@confirmar }
+            val stemViejo = f.nombre.removeSuffix(".jpg")
+            fotosDe(ruta).filter { it.nombre.startsWith("${stemViejo}_marcada") }.forEach {
+                renombrar(it.uri, it.nombre.replaceFirst(stemViejo, stemNuevo))
+            }
+            aviso("Ahora es: ${etiquetaFoto("$stemNuevo.jpg")}")
+            listo(FotoInfo(f.uri, "$stemNuevo.jpg"))
+        }
+    }
+
+    // ---------- Marcas sobre la foto (círculo, flecha, texto) ----------
+    // Las coordenadas se guardan normalizadas (0..1) para dibujarlas igual en pantalla y en la
+    // foto a resolución completa. Se guarda una copia "<foto>_marcada.jpg"; la original no se toca.
+
+    private class Marca(val tipo: String, var x1: Float, var y1: Float, var x2: Float, var y2: Float,
+                        val color: Int, val texto: String = "")
+
+    private val coloresMarca = listOf(Color.parseColor("#FF1744"), Color.parseColor("#FFD600"),
+                                      Color.WHITE, Color.parseColor("#00E5FF"))
+
+    /** Dibuja las marcas dentro del rectángulo [r] (donde está la foto). */
+    private fun dibujarMarcas(c: Canvas, r: RectF, marcas: List<Marca>) {
+        val lado = maxOf(r.width(), r.height())
+        val grosor = lado * 0.007f
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE; strokeWidth = grosor; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+            setShadowLayer(grosor * 0.8f, 0f, 0f, Color.argb(200, 0, 0, 0))
+        }
+        fun X(v: Float) = r.left + v * r.width()
+        fun Y(v: Float) = r.top + v * r.height()
+        for (m in marcas) {
+            p.color = m.color
+            when (m.tipo) {
+                "circulo" -> c.drawOval(minOf(X(m.x1), X(m.x2)), minOf(Y(m.y1), Y(m.y2)),
+                                        maxOf(X(m.x1), X(m.x2)), maxOf(Y(m.y1), Y(m.y2)), p)
+                "flecha" -> {
+                    val ax = X(m.x1); val ay = Y(m.y1); val bx = X(m.x2); val by = Y(m.y2)
+                    c.drawLine(ax, ay, bx, by, p)
+                    val ang = Math.atan2((by - ay).toDouble(), (bx - ax).toDouble())
+                    val largo = grosor * 6
+                    for (d in listOf(Math.toRadians(150.0), Math.toRadians(-150.0))) {
+                        c.drawLine(bx, by, bx + (largo * Math.cos(ang + d)).toFloat(), by + (largo * Math.sin(ang + d)).toFloat(), p)
+                    }
+                }
+                "texto" -> {
+                    val t = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                        textSize = lado * 0.04f; typeface = Typeface.DEFAULT_BOLD; color = m.color
+                    }
+                    val fm = t.fontMetrics
+                    val ancho = t.measureText(m.texto)
+                    val pad = t.textSize * 0.3f
+                    val x = X(m.x1).coerceIn(r.left, maxOf(r.left, r.right - ancho - 2 * pad))
+                    val y = Y(m.y1)
+                    c.drawRoundRect(x, y + fm.ascent - pad, x + ancho + 2 * pad, y + fm.descent + pad, pad, pad,
+                        Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(170, 0, 0, 0) })
+                    c.drawText(m.texto, x + pad, y, t)
+                }
+            }
+        }
+    }
+
+    /** Editor a pantalla completa: arrastrar para círculo o flecha, tocar para texto. Guarda una copia. */
+    private fun editorMarcas(f: FotoInfo, ruta: String, listo: (FotoInfo) -> Unit) {
+        val bmp = runCatching { cargarBitmap(f.uri, 2000) }.getOrNull() ?: run { aviso("No se pudo abrir la foto"); return }
+        val dlg = dialogoPantallaCompleta()
+        val raizV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.BLACK) }
+        raizV.addView(barraOscura(TextView(this).apply { text = "Marcar ${etiquetaFoto(f.nombre)}\nArrastra para dibujar · toca para texto" }) {
+            dlg.dismiss()
+        })
+        val vista = VistaDibujo(bmp)
+        raizV.addView(vista, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val herramientas = filaOscura()
+        val botonesH = mutableMapOf<String, LinearLayout>()
+        lateinit var botonColor: LinearLayout
+        fun refrescar() {
+            botonesH.forEach { (k, b) ->
+                val activo = k == vista.herramienta
+                b.background = fondoRedondeado(if (activo) C.acento else Color.parseColor("#1C2A3A"), 12)
+                val col = if (activo) C.tinta else Color.WHITE
+                ((b.getChildAt(0)) as ImageView).setImageDrawable(icono(
+                    when (k) { "circulo" -> R.drawable.ic_circulo; "flecha" -> R.drawable.ic_flecha; else -> R.drawable.ic_texto }, col, 26))
+                ((b.getChildAt(1)) as TextView).setTextColor(col)
+            }
+            (botonColor.getChildAt(0) as ImageView).setImageDrawable(icono(R.drawable.ic_color, vista.color, 26))
+        }
+        for ((k, nombre) in listOf("circulo" to "Círculo", "flecha" to "Flecha", "texto" to "Texto")) {
+            val b = accionOscura(R.drawable.ic_circulo, nombre) { vista.herramienta = k; refrescar() }
+            botonesH[k] = b; herramientas.addView(b)
+        }
+        botonColor = accionOscura(R.drawable.ic_color, "Color") {
+            vista.color = coloresMarca[(coloresMarca.indexOf(vista.color) + 1) % coloresMarca.size]; refrescar()
+        }
+        herramientas.addView(botonColor)
+        refrescar()
+
+        val acciones = filaOscura()
+        acciones.addView(accionOscura(R.drawable.ic_deshacer, "Deshacer") {
+            if (vista.marcas.isNotEmpty()) { vista.marcas.removeAt(vista.marcas.size - 1); vista.invalidate() }
+        })
+        acciones.addView(accionOscura(R.drawable.ic_cerrar, "Cancelar") {
+            if (vista.marcas.isEmpty()) dlg.dismiss() else confirmar("¿Salir sin guardar las marcas?") { dlg.dismiss() }
+        })
+        acciones.addView(accionOscura(R.drawable.ic_guardar, "Guardar", C.tinta, C.acento) {
+            if (vista.marcas.isEmpty()) { aviso("Dibuja al menos una marca"); return@accionOscura }
+            val espera = AlertDialog.Builder(this).setMessage("Guardando foto marcada…").setCancelable(false).show()
+            val marcas = vista.marcas.toList()
+            Thread {
+                val res = runCatching { guardarMarcada(f, ruta, marcas) }.getOrNull()
+                runOnUiThread {
+                    espera.dismiss()
+                    if (res == null) aviso("No se pudo guardar la foto marcada")
+                    else { aviso("Guardada: ${res.nombre}"); dlg.dismiss(); listo(res) }
+                }
+            }.start()
+        })
+        raizV.addView(herramientas)
+        raizV.addView(acciones.apply { setPadding(dp(4), 0, dp(4), dp(8)) })
+
+        vista.pedirTexto = { x, y ->
+            val et = EditText(this).apply {
+                hint = "Ej.: grieta, desgaste, 4,2 mm"
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            }
+            val col = columna()
+            col.addView(et)
+            col.addView(boton("🎤  Dictar") { dictar(et) })
+            mostrar(AlertDialog.Builder(this).setTitle("Texto en la foto").setView(col)
+                .setPositiveButton("Poner") { _, _ ->
+                    val t = et.text.toString().trim()
+                    if (t.isNotEmpty()) { vista.marcas.add(Marca("texto", x, y, x, y, vista.color, t)); vista.invalidate() }
+                }
+                .setNegativeButton("Cancelar", null).create())
+        }
+        dlg.setContentView(raizV)
+        dlg.show()
+    }
+
+    /** Dibuja las marcas sobre la foto a resolución completa y la guarda como copia "_marcada". */
+    private fun guardarMarcada(f: FotoInfo, ruta: String, marcas: List<Marca>): FotoInfo? {
+        val grande = ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, f.uri)) { dec, info, _ ->
+            dec.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            dec.isMutableRequired = true
+            val lado = maxOf(info.size.width, info.size.height)
+            var m = 1
+            while (lado / (m + 1) >= 4000) m++
+            if (m > 1) dec.setTargetSampleSize(m)
+        }
+        dibujarMarcas(Canvas(grande), RectF(0f, 0f, grande.width.toFloat(), grande.height.toFloat()), marcas)
+        val stem = f.nombre.substringBeforeLast('.').substringBefore("_marcada")
+        val nombre = if (buscarArchivo(ruta, "${stem}_marcada.jpg") == null) "${stem}_marcada.jpg"
+                     else "${stem}_marcada_${libre(ruta, "${stem}_marcada_%d.jpg", 2)}.jpg"
+        val uri = crearImagen(ruta, nombre) ?: return null
+        val ok = contentResolver.openOutputStream(uri)?.use { grande.compress(Bitmap.CompressFormat.JPEG, 92, it) } ?: false
+        grande.recycle()
+        if (!ok) { runCatching { contentResolver.delete(uri, null, null) }; return null }
+        return FotoInfo(uri, nombre)
+    }
+
+    /** Vista del editor de marcas: muestra la foto y las marcas; arrastrar crea círculo/flecha. */
+    private inner class VistaDibujo(val bmp: Bitmap) : View(this@MainActivity) {
+        val marcas = mutableListOf<Marca>()
+        var herramienta = "circulo"
+        var color = coloresMarca[0]
+        var pedirTexto: (Float, Float) -> Unit = { _, _ -> }
+        private var actual: Marca? = null
+        private var rect = RectF()
+        private val pintura = Paint(Paint.FILTER_BITMAP_FLAG)
+
+        init { setLayerType(LAYER_TYPE_SOFTWARE, null) }   // sombras de las marcas
+
+        override fun onDraw(c: Canvas) {
+            val s = minOf(width.toFloat() / bmp.width, height.toFloat() / bmp.height)
+            val w = bmp.width * s; val h = bmp.height * s
+            rect = RectF((width - w) / 2, (height - h) / 2, (width + w) / 2, (height + h) / 2)
+            c.drawBitmap(bmp, null, rect, pintura)
+            dibujarMarcas(c, rect, marcas + listOfNotNull(actual))
+        }
+
+        private fun nx(x: Float) = ((x - rect.left) / rect.width()).coerceIn(0f, 1f)
+        private fun ny(y: Float) = ((y - rect.top) / rect.height()).coerceIn(0f, 1f)
+
+        override fun onTouchEvent(e: MotionEvent): Boolean {
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    if (herramienta != "texto") actual = Marca(herramienta, nx(e.x), ny(e.y), nx(e.x), ny(e.y), color)
+                }
+                MotionEvent.ACTION_MOVE -> actual?.let { it.x2 = nx(e.x); it.y2 = ny(e.y); invalidate() }
+                MotionEvent.ACTION_UP -> {
+                    performClick()
+                    val m = actual; actual = null
+                    if (herramienta == "texto") { val x = nx(e.x); val y = ny(e.y); post { pedirTexto(x, y) } }
+                    else if (m != null) {
+                        val dx = (m.x2 - m.x1) * rect.width(); val dy = (m.y2 - m.y1) * rect.height()
+                        if (Math.hypot(dx.toDouble(), dy.toDouble()) > dp(16)) marcas.add(m)
+                        else if (m.tipo == "circulo") {
+                            // toque corto: círculo de tamaño fijo centrado en el punto
+                            val rx = dp(40) / rect.width(); val ry = dp(40) / rect.height()
+                            marcas.add(Marca("circulo", m.x1 - rx, m.y1 - ry, m.x1 + rx, m.y1 + ry, m.color))
+                        }
+                    }
+                    invalidate()
+                }
+                MotionEvent.ACTION_CANCEL -> { actual = null; invalidate() }
+            }
+            return true
+        }
+
+        override fun performClick(): Boolean = super.performClick()
     }
 
     /** Imagen con zoom (pellizcar / doble toque), arrastre y deslizamiento lateral para cambiar de foto. */
@@ -1645,6 +1950,111 @@ class MainActivity : AppCompatActivity() {
         return lista.size
     }
 
+    // ---------- Exportar Excel .xlsx ----------
+    // "BoilerImage <evento>.xlsx" en la carpeta del evento: hoja Resumen (por pared), una hoja por
+    // tipo de singularidad (estado, fotos, nota, espesores, RA) y hoja Terreno si hay registros.
+
+    private fun numero(v: String) = v.replace(',', '.').toDoubleOrNull()
+
+    private fun exportarExcel() {
+        val espera = AlertDialog.Builder(this).setMessage("Generando Excel…").setCancelable(false).show()
+        Thread {
+            val res = runCatching { generarExcel() }
+            runOnUiThread {
+                espera.dismiss()
+                res.onFailure { aviso("No se pudo generar el Excel: ${it.message}") }
+                res.getOrNull()?.let { (uri, nombre) ->
+                    exportarNotas()   // mantiene también el CSV de notas
+                    mostrar(AlertDialog.Builder(this).setTitle("Excel listo")
+                        .setMessage("$raiz/$evento/$nombre")
+                        .setPositiveButton("Abrir") { _, _ ->
+                            val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, MIME_XLSX)
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            runCatching { startActivity(i) }.onFailure { aviso("No hay app para abrir Excel") }
+                        }
+                        .setNeutralButton("Compartir") { _, _ ->
+                            val i = Intent(Intent.ACTION_SEND).setType(MIME_XLSX)
+                                .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            runCatching { startActivity(Intent.createChooser(i, "Compartir Excel")) }
+                        }
+                        .setNegativeButton("Cerrar", null).create())
+                }
+            }
+        }.start()
+    }
+
+    private fun generarExcel(): Pair<Uri, String> {
+        // Nombres de imágenes por carpeta (una sola consulta)
+        val archivos = HashMap<String, MutableList<String>>()
+        contentResolver.query(coleccion, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.DISPLAY_NAME),
+            "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?" + soloImagenes, arrayOf("$raiz/$evento/%"), null)?.use { c ->
+            while (c.moveToNext()) archivos.getOrPut(c.getString(0) ?: continue) { mutableListOf() }.add(c.getString(1) ?: "")
+        }
+        val meds = mediciones().filter { it.optString("origen") == "sing" }.groupBy { it.optString("ruta") }
+        val conNota = carpetasConNota()
+        val x = Xlsx()
+        val resumen = x.hoja("Resumen",
+            listOf("Tipo", "Pared", "Singularidades", "Completas", "Incompletas", "Sin fotos", "Con nota", "Espesor mín. (mm)"),
+            listOf(24, 20, 14, 12, 12, 11, 11, 16))
+        for (t in tipos) {
+            val h = x.hoja(t.nombre,
+                listOf("Pared", "Singularidad", "Estado", "Generales", "Detalles", "Marcadas", "Nota",
+                       "Espesores (mm)", "Espesor mín. (mm)", "Mediciones RA"),
+                listOf(18, 13, 12, 11, 10, 10, 45, 40, 16, 40))
+            for (p in t.paredes) {
+                var completas = 0; var incompletas = 0; var sinFotos = 0; var notas = 0
+                var minPared: Double? = null
+                for (n in 1..p.cantidad) {
+                    val ruta = carpeta(t, p, n)
+                    val nombres = archivos[ruta].orEmpty()
+                    val gen = nombres.count { it.contains("_general") && !it.contains("_marcada") }
+                    val det = nombres.count { it.contains("_detalle") && !it.contains("_marcada") }
+                    val marc = nombres.count { it.contains("_marcada") }
+                    // igual que contarFotos(): todo lo que no es general cuenta como detalle
+                    val info = gen to nombres.count { !it.contains("_marcada") && !it.contains("_general") }
+                    val est = estado(info)
+                    when (est) { 2 -> completas++; 1 -> incompletas++; else -> sinFotos++ }
+                    val nota = if (ruta in conNota) leerNota(ruta) else ""
+                    if (nota.isNotBlank()) notas++
+                    val lista = meds[ruta].orEmpty()
+                    val esp = lista.filter { !esRA(it) }.flatMap { puntosDe(it) }
+                    val valores = esp.mapNotNull { numero(it.valor) }
+                    val min = valores.minOrNull()
+                    if (min != null) minPared = minOf(minPared ?: min, min)
+                    val textoEsp = lista.filter { !esRA(it) }.joinToString("\n") { m ->
+                        puntosDe(m).mapIndexed { i, pt -> "P${i + 1} ${textoValor(pt.valor)}" }.joinToString(" · ")
+                    }
+                    val textoRA = lista.filter { esRA(it) }.joinToString("\n") {
+                        "${it.optString("modo")}: ${it.optString("resumen").replace("\n", " · ")}"
+                    }
+                    h.fila(p.nombre, "%s %02d".format(t.prefijo, n),
+                        when (est) { 2 -> "Completa"; 1 -> "Incompleta"; else -> "Sin fotos" },
+                        gen, det, if (marc > 0) marc else null, nota.ifBlank { null },
+                        textoEsp.ifBlank { null }, min, textoRA.ifBlank { null })
+                }
+                resumen.fila(t.nombre, p.nombre, p.cantidad, completas, incompletas, sinFotos, notas, minPared)
+            }
+        }
+        val regs = registros()
+        if (regs.isNotEmpty()) {
+            val h = x.hoja("Terreno", listOf("Nº", "Fecha", "Hora", "Espesor (mm)", "Nota", "Foto"), listOf(7, 12, 8, 13, 50, 20))
+            regs.sortedBy { it.num }.forEach { r ->
+                val f = Date(r.fecha)
+                h.fila(r.num, fmtFecha.format(f), fmtHora.format(f), numero(r.valor) ?: r.valor.ifBlank { null },
+                       r.nota.ifBlank { null }, r.foto.ifBlank { null })
+            }
+        }
+        val nombre = "BoilerImage $evento.xlsx"
+        val ruta = "$raiz/$evento/"
+        val uri = buscarArchivo(ruta, nombre) ?: contentResolver.insert(coleccion, ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
+            put(MediaStore.MediaColumns.MIME_TYPE, MIME_XLSX)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, ruta)
+        }) ?: error("no se pudo crear el archivo")
+        contentResolver.openOutputStream(uri, "wt")?.use { it.write(x.bytes()) } ?: error("no se pudo escribir")
+        return uri to nombre
+    }
+
     // ---------- Medición: foto con puntos de espesor ----------
     // Un solo flujo: foto de la zona → tocar cada punto medido → valor por foto del medidor
     // (lectura automática) o escrito / dictado → la foto muestra el espesor en cada punto →
@@ -2442,9 +2852,8 @@ class MainActivity : AppCompatActivity() {
         val t = tipos[ti]
         val p = t.paredes[pi]
         val ruta = carpeta(t, p, n)
-        val previas = contarFotos()[ruta]
-        val previasModo = if (modo == "general") previas?.first ?: 0 else previas?.second ?: 0
-        val nombre = "%s%02d_%s_%d.jpg".format(t.prefijo, n, modo, previasModo + 1)
+        val pre = "%s%02d_%s_".format(t.prefijo, n, modo)
+        val nombre = "$pre${libre(ruta, "$pre%d.jpg")}.jpg"
 
         val valores = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, nombre)
@@ -2481,6 +2890,7 @@ class MainActivity : AppCompatActivity() {
             while (c.moveToNext()) {
                 val ruta = c.getString(0) ?: continue
                 val nombre = c.getString(1) ?: ""
+                if (nombre.contains("_marcada")) continue   // copias con marcas no cuentan como fotos nuevas
                 val (g, d) = res[ruta] ?: (0 to 0)
                 res[ruta] = if (nombre.contains("_general")) (g + 1 to d) else (g to d + 1)
             }
