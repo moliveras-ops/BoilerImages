@@ -104,7 +104,7 @@ class MainActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
-                    enTerreno -> { enTerreno = false; render() }
+                    enTerreno -> { enTerreno = false; enEvento = false; render() }
                     paredActual >= 0 -> { paredActual = -1; render() }
                     tipoActual >= 0 -> { tipoActual = -1; render() }
                     enEvento -> { enEvento = false; render() }
@@ -202,9 +202,10 @@ class MainActivity : AppCompatActivity() {
     private fun pantallaEventos() {
         title = "BoilerImage — Eventos"
         val col = columna()
-        col.addView(boton("📏  Notas en terreno (${registros().size})") {
-            enTerreno = true; render()
-        }.apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
+        val activo = eventoActivo()
+        val etiqueta = if (activo == null) "📏  Notas en terreno\n(elige un evento)"
+                       else "📏  Notas en terreno — $activo (${registros().size})"
+        col.addView(boton(etiqueta) { abrirTerreno() }.apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
         col.addView(espacio(16))
         col.addView(texto("Eventos en el teléfono  (✎ para eliminar)", 14f, true))
 
@@ -589,14 +590,45 @@ class MainActivity : AppCompatActivity() {
 
     data class Registro(val num: Int, val fecha: Long, var valor: String, var nota: String, val foto: String)
 
-    private val carpetaTerreno get() = "$raiz/Notas en terreno/"
+    private val carpetaTerreno get() = "$raiz/$evento/Notas en terreno/"
+
+    /** Evento activo (marcado con ●) si existe; null si no hay ninguno. */
+    private fun eventoActivo(): String? {
+        if (!prefs.contains("evento")) return null
+        val existentes = eventosGuardados() + resumenEventos().keys
+        return evento.takeIf { it in existentes }
+    }
+
+    private fun abrirTerreno() {
+        if (eventoActivo() != null) { enTerreno = true; render(); return }
+        val existentes = (eventosGuardados() + resumenEventos().keys).distinct()
+        val irA: (String) -> Unit = { nombre ->
+            evento = nombre
+            guardarEventos(eventosGuardados() + nombre)
+            enTerreno = true; render()
+        }
+        val crear = {
+            dialogoTexto("Nombre del evento (ej. PGP Santa Fe 2026)", "") { irA(limpiar(it)) }
+        }
+        if (existentes.isEmpty()) {
+            AlertDialog.Builder(this).setTitle("Notas en terreno")
+                .setMessage("Las notas se guardan dentro de un evento. Crea uno primero.")
+                .setPositiveButton("＋ Nuevo evento") { _, _ -> crear() }
+                .setNegativeButton("Cancelar", null).show()
+        } else {
+            AlertDialog.Builder(this).setTitle("¿En qué evento guardar las notas?")
+                .setItems(existentes.toTypedArray()) { _, i -> irA(existentes[i]) }
+                .setPositiveButton("＋ Nuevo evento") { _, _ -> crear() }
+                .setNegativeButton("Cancelar", null).show()
+        }
+    }
     private val fmtFecha = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault())
     private val fmtHora = SimpleDateFormat("HH:mm", Locale.getDefault())
 
     private fun registros(): MutableList<Registro> {
         val l = mutableListOf<Registro>()
         runCatching {
-            val arr = JSONArray(prefs.getString("terreno", "[]"))
+            val arr = JSONArray(prefs.getString("terreno_$evento", "[]"))
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 l.add(Registro(o.getInt("num"), o.getLong("fecha"), o.optString("valor"),
@@ -612,12 +644,12 @@ class MainActivity : AppCompatActivity() {
             arr.put(JSONObject().put("num", it.num).put("fecha", it.fecha).put("valor", it.valor)
                 .put("nota", it.nota).put("foto", it.foto))
         }
-        prefs.edit().putString("terreno", arr.toString()).apply()
+        prefs.edit().putString("terreno_$evento", arr.toString()).apply()
         exportarCsv(l)
     }
 
     private fun pantallaTerreno() {
-        title = "Notas en terreno"
+        title = "Notas en terreno — $evento"
         val col = columna()
         col.addView(boton("📷  Nuevo registro (foto del medidor)") { nuevoRegistro() }
             .apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
@@ -635,7 +667,7 @@ class MainActivity : AppCompatActivity() {
             }.apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL })
         }
         col.addView(espacio(16))
-        col.addView(boton("← Volver") { enTerreno = false; render() })
+        col.addView(boton("← Volver a eventos") { enTerreno = false; enEvento = false; render() })
         col.addView(espacio(16))
         col.addView(texto("Se guardan en: $carpetaTerreno\nIncluye Registros.csv para abrir en Excel.", 12f))
         setContentView(scroll(col))
