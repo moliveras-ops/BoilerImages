@@ -417,6 +417,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(boton("＋ Agregar tipo") { agregarTipo() })
         col.addView(boton("💾  Guardar como plantilla de caldera") { guardarComoPlantilla() })
         col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
+        col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
         col.addView(espacio(16))
         col.addView(boton("← Cambiar evento") { enEvento = false; render() })
         col.addView(espacio(20))
@@ -1956,6 +1957,114 @@ class MainActivity : AppCompatActivity() {
 
     private fun numero(v: String) = v.replace(',', '.').toDoubleOrNull()
 
+    // ---------- Exportar evento en un ZIP ----------
+    // Un solo archivo con las carpetas del evento (fotos, notas, Excel), en
+    // Documents/BoilerImage/Exportaciones/ (visible por USB) y listo para compartir.
+    // "Para informe": generales, marcadas, fotos con espesores, RA y mediciones de terreno,
+    // sin detalles, originales ni fotos del medidor. Los textos, CSV y Excel van siempre.
+
+    private val carpetaExport get() = "$raiz/Exportaciones/"
+
+    private fun menuZip() {
+        menuGrande("Exportar evento (ZIP)", listOf(
+            "📦  Evento completo\nTodas las fotos, notas y Excel" to { exportarZip(false) },
+            "🖼  Solo para informe\nGenerales, marcadas, espesores y RA (sin detalles ni originales)" to { exportarZip(true) }))
+    }
+
+    private fun paraInforme(ruta: String, nombre: String): Boolean {
+        if (!nombre.endsWith(".jpg", true) && !nombre.endsWith(".png", true)) return true
+        if (nombre.contains("_general") || nombre.contains("_marcada")) return true
+        if (ruta.contains("/Espesores/") || ruta.contains("/Originales/")) return false
+        if (nombre.contains("_detalle") || nombre.startsWith("Registro_")) return false
+        return true
+    }
+
+    private fun exportarZip(informe: Boolean) {
+        val ev = evento
+        val vista = TextView(this).apply { text = "Preparando…"; textSize = 16f; setPadding(dp(24), dp(20), dp(24), dp(8)) }
+        val barraP = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100; setPadding(dp(24), 0, dp(24), dp(16))
+        }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(vista); addView(barraP) }
+        var cancelar = false
+        val espera = AlertDialog.Builder(this).setTitle("Creando ZIP").setView(col).setCancelable(false)
+            .setNegativeButton("Cancelar") { _, _ -> cancelar = true }.show()
+        Thread {
+            val res = runCatching {
+                runCatching { generarExcel() }   // Excel y CSV al día dentro del ZIP
+                exportarNotas()
+                // Archivos del evento
+                data class Arch(val uri: Uri, val ruta: String, val nombre: String, val tam: Long)
+                val lista = mutableListOf<Arch>()
+                contentResolver.query(coleccion,
+                    arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.RELATIVE_PATH,
+                            MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.SIZE),
+                    "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?", arrayOf("$raiz/$ev/%"), null)?.use { c ->
+                    while (c.moveToNext()) {
+                        val ruta = c.getString(1) ?: continue
+                        val nombre = c.getString(2) ?: continue
+                        if (informe && !paraInforme(ruta, nombre)) continue
+                        lista.add(Arch(android.content.ContentUris.withAppendedId(coleccion, c.getLong(0)), ruta, nombre, c.getLong(3)))
+                    }
+                }
+                if (lista.isEmpty()) error("El evento no tiene archivos")
+                lista.sortBy { it.ruta + it.nombre }
+                val total = lista.sumOf { maxOf(it.tam, 1L) }
+                val sello = SimpleDateFormat("yyyy-MM-dd HHmm", Locale.getDefault()).format(Date())
+                val nombreZip = "BoilerImage $ev ${if (informe) "informe" else "completo"} $sello.zip"
+                val uriZip = contentResolver.insert(coleccion, ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, nombreZip)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "application/zip")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, carpetaExport)
+                }) ?: error("No se pudo crear el archivo")
+                var hecho = 0L
+                var n = 0
+                try {
+                    contentResolver.openOutputStream(uriZip)?.use { os ->
+                        java.util.zip.ZipOutputStream(java.io.BufferedOutputStream(os, 1 shl 16)).use { z ->
+                            val buf = ByteArray(1 shl 16)
+                            for (a in lista) {
+                                if (cancelar) error("cancelado")
+                                val esImagen = a.nombre.endsWith(".jpg", true) || a.nombre.endsWith(".png", true)
+                                // las fotos ya vienen comprimidas: guardarlas sin recomprimir es mucho más rápido
+                                z.setLevel(if (esImagen) java.util.zip.Deflater.NO_COMPRESSION else java.util.zip.Deflater.DEFAULT_COMPRESSION)
+                                z.putNextEntry(java.util.zip.ZipEntry(a.ruta.removePrefix("$raiz/") + a.nombre))
+                                contentResolver.openInputStream(a.uri)?.use { ins ->
+                                    while (true) { val k = ins.read(buf); if (k < 0) break; z.write(buf, 0, k) }
+                                }
+                                z.closeEntry()
+                                hecho += maxOf(a.tam, 1L); n++
+                                val pct = (hecho * 100 / total).toInt()
+                                runOnUiThread { vista.text = "$n de ${lista.size} archivos"; barraP.progress = pct }
+                            }
+                        }
+                    } ?: error("No se pudo escribir el ZIP")
+                } catch (e: Exception) {
+                    runCatching { contentResolver.delete(uriZip, null, null) }
+                    throw e
+                }
+                val tam = contentResolver.query(uriZip, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null)
+                    ?.use { if (it.moveToFirst()) it.getLong(0) else 0L } ?: 0L
+                Triple(uriZip, nombreZip, "${lista.size} archivos · ${"%.1f".format(tam / 1048576.0)} MB")
+            }
+            runOnUiThread {
+                runCatching { espera.dismiss() }
+                res.onFailure { if (it.message != "cancelado") aviso("No se pudo crear el ZIP: ${it.message}") else aviso("ZIP cancelado") }
+                res.getOrNull()?.let { (uri, nombre, detalle) ->
+                    mostrar(AlertDialog.Builder(this).setTitle("ZIP listo")
+                        .setMessage("$detalle\n\n$carpetaExport$nombre\n\nPor USB: Documents › BoilerImage › Exportaciones")
+                        .setPositiveButton("Compartir") { _, _ ->
+                            val i = Intent(Intent.ACTION_SEND).setType("application/zip")
+                                .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            runCatching { startActivity(Intent.createChooser(i, "Compartir ZIP")) }
+                                .onFailure { aviso("No hay app para compartir") }
+                        }
+                        .setNegativeButton("Cerrar", null).create())
+                }
+            }
+        }.start()
+    }
+
     private fun exportarExcel() {
         val espera = AlertDialog.Builder(this).setMessage("Generando Excel…").setCancelable(false).show()
         Thread {
@@ -3008,7 +3117,7 @@ class MainActivity : AppCompatActivity() {
         "✋" to R.drawable.ic_mover, "🗑" to R.drawable.ic_borrar, "🖼" to R.drawable.ic_imagen,
         "⌨️" to R.drawable.ic_teclado, "⌨" to R.drawable.ic_teclado, "←" to R.drawable.ic_volver,
         "＋" to R.drawable.ic_agregar, "✕" to R.drawable.ic_cerrar, "✓" to R.drawable.ic_listo,
-        "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento, "📐" to R.drawable.ic_regla)
+        "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento, "📐" to R.drawable.ic_regla, "📦" to R.drawable.ic_zip)
 
     /** Separa un emoji inicial del texto: (ícono, texto limpio). */
     private fun separarIcono(s: String): Pair<Int?, String> {
