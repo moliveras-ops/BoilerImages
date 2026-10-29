@@ -69,7 +69,7 @@ class MainActivity : AppCompatActivity() {
     // Respaldo automático cada vez que cambia la configuración
     private var respaldoPendiente = false
     private val alCambiarPrefs = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, clave ->
-        if (clave == null || clave.startsWith("pend") || respaldoPendiente) return@OnSharedPreferenceChangeListener
+        if (clave == null || clave.startsWith("pend") || clave == "respaldo_uri" || respaldoPendiente) return@OnSharedPreferenceChangeListener
         respaldoPendiente = true
         android.os.Handler(android.os.Looper.getMainLooper())
             .postDelayed({ respaldoPendiente = false; respaldar(false) }, 1500)
@@ -1421,7 +1421,7 @@ class MainActivity : AppCompatActivity() {
         o.put("app", "BoilerImage").put("version", 1).put("fecha", System.currentTimeMillis())
         val datos = JSONObject()
         for ((k, v) in prefs.all) {
-            if (k.startsWith("pend") || v == null) continue
+            if (k.startsWith("pend") || k == "respaldo_uri" || v == null) continue
             val t = when (v) {
                 is String -> "s"; is Int -> "i"; is Long -> "l"; is Boolean -> "b"; is Float -> "f"
                 else -> continue
@@ -1429,8 +1429,52 @@ class MainActivity : AppCompatActivity() {
             datos.put(k, JSONObject().put("t", t).put("v", v))
         }
         o.put("datos", datos)
-        escribirTexto("$raiz/", archivoRespaldo, o.toString(2))
-        if (avisar) aviso("Respaldo guardado en $raiz/$archivoRespaldo")
+        val texto = o.toString(2)
+        // copia interna siempre (no depende de la carpeta Documents)
+        runCatching { java.io.File(filesDir, "respaldo.json").writeText(texto) }
+        val (ok, nombre, error) = escribirRespaldo(texto)
+        if (ok) { if (avisar) aviso("Respaldo guardado en $raiz/$nombre") }
+        else if (avisar || !avisoRespaldoMostrado) {
+            avisoRespaldoMostrado = true
+            aviso("No se pudo guardar el respaldo en Documents ($error). Queda una copia interna.")
+        }
+    }
+
+    private var avisoRespaldoMostrado = false
+
+    /**
+     * Escribe el respaldo sin avisos. Si el archivo existente no es de esta instalación (p. ej. quedó de
+     * una instalación anterior), Android no deja reemplazarlo: se usa "Respaldo BoilerImage 2.json".
+     * La ubicación que funcionó se recuerda en prefs "respaldo_uri".
+     */
+    private fun escribirRespaldo(texto: String): Triple<Boolean, String, String> {
+        fun escribir(u: Uri) = runCatching {
+            contentResolver.openOutputStream(u, "wt")?.bufferedWriter()?.use { it.write(texto + "\n") } != null
+        }.getOrDefault(false)
+        fun nombreDe(u: Uri) = runCatching {
+            contentResolver.query(u, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        }.getOrNull() ?: archivoRespaldo
+        prefs.getString("respaldo_uri", null)?.let { Uri.parse(it) }?.let { u ->
+            if (escribir(u)) return Triple(true, nombreDe(u), "")
+        }
+        var error = "sin acceso"
+        for (nombre in listOf(archivoRespaldo, "Respaldo BoilerImage 2.json")) {
+            val u = runCatching { buscarArchivo("$raiz/", nombre) }.getOrNull() ?: try {
+                contentResolver.insert(coleccion, ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "$raiz/")
+                })
+            } catch (e: Exception) { error = e.message ?: e.javaClass.simpleName; null }
+            if (u != null && escribir(u)) {
+                if (prefs.getString("respaldo_uri", null) != u.toString())
+                    prefs.edit().putString("respaldo_uri", u.toString()).apply()
+                return Triple(true, nombreDe(u), "")
+            }
+        }
+        return Triple(false, archivoRespaldo, error)
     }
 
     private fun restaurarDesde(uri: Uri) {

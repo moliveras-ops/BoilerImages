@@ -34,6 +34,11 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import android.graphics.ImageFormat
+import android.hardware.camera2.CameraCharacteristics
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
@@ -319,7 +324,8 @@ class CamaraActivity : AppCompatActivity() {
         btnSiguiente.alpha = if (indice < rutas.size - 1) 1f else 0.35f
         estiloChip(btnGeneral, modo == "general")
         estiloChip(btnDetalle, modo == "detalle")
-        btnRes.text = if (prefs.getString("cam_res", "normal") == "max") "Máx" else "12 MP"
+        btnRes.text = captura?.resolutionInfo?.resolution?.let { "${mp(it)} MP" }
+            ?: if (prefs.getString("cam_res", "normal") == "max") "Máx" else "12 MP"
         btnExt.text = nombreExt(extActual)
         btnExt.visibility = if (extDisponibles.size > 1) View.VISIBLE else View.GONE
         btnLinterna.background = RippleDrawable(ColorStateList.valueOf(Color.argb(60, 255, 255, 255)),
@@ -387,13 +393,22 @@ class CamaraActivity : AppCompatActivity() {
 
     private fun vincular() {
         val p = proveedor ?: return
-        val maxima = prefs.getString("cam_res", "normal") == "max"
+        if (tamanos.isEmpty()) leerTamanos(p)
+        val pref = prefs.getString("cam_res", "normal") ?: "normal"
+        val maxima = pref != "normal"
+        val pedido: Size? = when (pref) {
+            "normal", "max" -> if (pref == "normal") Size(4000, 3000) else null
+            else -> runCatching { pref.split("x").let { Size(it[0].toInt(), it[1].toInt()) } }.getOrNull() ?: Size(4000, 3000)
+        }
         val selector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
             .setResolutionStrategy(
-                if (maxima) ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY
-                else ResolutionStrategy(Size(4000, 3000), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
-            .apply { if (maxima) setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE) }
+                if (pedido == null) ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY
+                else ResolutionStrategy(pedido, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
+            .apply {
+                if (pedido == null || pedido.width.toLong() * pedido.height > 13_000_000L)
+                    setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
+            }
             .build()
         val preview = Preview.Builder()
             .setResolutionSelector(ResolutionSelector.Builder()
@@ -479,11 +494,62 @@ class CamaraActivity : AppCompatActivity() {
         refrescar()
     }
 
+    private fun mp(z: Size): String {
+        val m = z.width.toLong() * z.height / 1_000_000.0
+        return if (m < 10) "%.1f".format(m).replace('.', ',').removeSuffix(",0") else Math.round(m).toString()
+    }
+
+    /** Tamaños 4:3 que la cámara trasera ofrece a otras apps (normales y de alta resolución). */
+    private val tamanos = mutableListOf<Size>()
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun leerTamanos(p: ProcessCameraProvider) {
+        runCatching {
+            val info = CameraSelector.DEFAULT_BACK_CAMERA.filter(p.availableCameraInfos).firstOrNull() ?: return
+            val c2 = Camera2CameraInfo.from(info)
+            val todos = mutableListOf<Size>()
+            c2.getCameraCharacteristic(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)?.let { m ->
+                m.getOutputSizes(ImageFormat.JPEG)?.let { todos.addAll(it) }
+                m.getHighResolutionOutputSizes(ImageFormat.JPEG)?.let { todos.addAll(it) }
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 31)
+                c2.getCameraCharacteristic(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)
+                    ?.getOutputSizes(ImageFormat.JPEG)?.let { todos.addAll(it) }
+            val cuatroTercios = todos.filter { maxOf(it.width, it.height) * 3 == minOf(it.width, it.height) * 4 }
+                .filter { it.width.toLong() * it.height >= 1_900_000L }
+                .distinctBy { mp(it) }
+                .sortedBy { it.width.toLong() * it.height }
+            // como máximo 7 opciones, repartidas entre la menor y la mayor
+            val elegidos = if (cuatroTercios.size <= 7) cuatroTercios else {
+                val metas = listOf(2.0, 5.0, 8.0, 12.0, 24.0, 50.0, 1e9)
+                metas.mapNotNull { meta -> cuatroTercios.minByOrNull { Math.abs(it.width.toLong() * it.height / 1e6 - meta) } }.distinct()
+            }
+            tamanos.clear(); tamanos.addAll(elegidos)
+        }
+    }
+
     private fun cambiarResolucion() {
-        val max = prefs.getString("cam_res", "normal") == "max"
-        prefs.edit().putString("cam_res", if (max) "normal" else "max").apply()
-        aviso(if (max) "Resolución 12 MP (más rápida y liviana)" else "Resolución máxima (archivos más pesados)")
-        vincular()
+        val opciones = tamanos.toList()
+        if (opciones.isEmpty()) {
+            val max = prefs.getString("cam_res", "normal") == "max"
+            prefs.edit().putString("cam_res", if (max) "normal" else "max").apply()
+            vincular(); return
+        }
+        val actual = captura?.resolutionInfo?.resolution
+        val etiquetas = opciones.map { z ->
+            val m = z.width.toLong() * z.height / 1e6
+            "${mp(z)} MP  (${maxOf(z.width, z.height)}×${minOf(z.width, z.height)})" +
+                when { m > 30 -> " · archivos pesados"; m in 11.0..13.5 -> " · recomendado"; else -> "" }
+        }.toTypedArray()
+        val marcado = opciones.indexOfFirst { actual != null && mp(it) == mp(actual) }
+        AlertDialog.Builder(this).setTitle("Resolución de las fotos")
+            .setSingleChoiceItems(etiquetas, marcado) { d, i ->
+                val z = opciones[i]
+                prefs.edit().putString("cam_res", "${z.width}x${z.height}").apply()
+                d.dismiss(); vincular()
+                aviso("Resolución ${mp(z)} MP")
+            }
+            .setNegativeButton("Cancelar", null).show()
     }
 
     private fun cambiarExtension() {
