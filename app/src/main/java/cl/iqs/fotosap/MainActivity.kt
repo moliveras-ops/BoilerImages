@@ -3,7 +3,10 @@ package cl.iqs.fotosap
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ImageDecoder
@@ -309,11 +312,11 @@ class MainActivity : AppCompatActivity() {
         title = "BoilerImage — Eventos"
         val col = columna()
         val activo = eventoActivo()
-        val etiqueta = if (activo == null) "📏  Notas en terreno\n(elige un evento)"
-                       else "📏  Notas en terreno — $activo (${mediciones().count { it.optString("origen") == "terreno" }} mediciones)"
-        col.addView(boton(etiqueta) { abrirTerreno() }.apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
+        val etiqueta = if (activo == null) "📏  Notas en terreno\nElige un evento"
+                       else "📏  Notas en terreno\n$activo · ${mediciones().count { it.optString("origen") == "terreno" }} mediciones"
+        col.addView(boton(etiqueta, Estilo.PRIMARIO) { abrirTerreno() }.apply { minHeight = dp(76); textSize = 17f })
         col.addView(espacio(16))
-        col.addView(texto("Eventos en el teléfono  (✎ para eliminar)", 14f, true))
+        col.addView(texto("Eventos", 14f, true))
 
         val resumen = resumenEventos()
         val nombres = (eventosGuardados() + resumen.keys).distinct()
@@ -326,11 +329,11 @@ class MainActivity : AppCompatActivity() {
             val detalle = if (r == null) "sin fotos"
                 else "${r.first} fotos · última: ${fecha.format(Date(r.second * 1000))}"
             val marca = if (nombre == evento) "● " else ""
-            val cald = prefs.getString("caldera_$nombre", null)?.let { "\n🏭 $it" } ?: ""
-            col.addView(fila("$marca$nombre\n$detalle$cald", { abrirEvento(nombre) }) { menuEvento(nombre) })
+            val cald = prefs.getString("caldera_$nombre", null)?.let { "\n$it" } ?: ""
+            col.addView(fila("📅 $marca$nombre\n$detalle$cald", { abrirEvento(nombre) }) { menuEvento(nombre) })
         }
-        col.addView(boton("＋ Nuevo evento") { nuevoEvento() })
-        col.addView(espacio(12))
+        col.addView(boton("＋ Nuevo evento", Estilo.ACENTO) { nuevoEvento() })
+        col.addView(texto("Configuración", 14f, true))
         col.addView(boton("🏭  Plantas y calderas (${plantas().size} plantas · ${calderas().size} calderas)") {
             enCalderas = true; plantaActual = null; render()
         })
@@ -343,7 +346,7 @@ class MainActivity : AppCompatActivity() {
     private fun pantallaTipos() {
         title = evento
         val col = columna()
-        col.addView(texto("Tipos de singularidad  (✎ para editar)", 14f, true))
+        col.addView(texto("Tipos de singularidad", 14f, true))
 
         val conteo = contarFotos()
         val notas = todasLasNotas()
@@ -352,15 +355,17 @@ class MainActivity : AppCompatActivity() {
             val listos = t.paredes.sumOf { p ->
                 (1..p.cantidad).count { estado(conteo[carpeta(t, p, it)]) == 2 }
             }
-            col.addView(fila("${t.nombre}\n$listos / $total completos",
-                { tipoActual = i; render() }) { menuTipo(i) })
+            col.addView(fila("${t.nombre}\n$listos de $total completas · prefijo ${t.prefijo}",
+                { tipoActual = i; render() }, listos to total) { menuTipo(i) })
             val notasTipo = notas.filter { it.tipo == t.nombre }
             if (notasTipo.isNotEmpty()) {
                 val ultimas = notasTipo.takeLast(2).joinToString("\n") {
                     "%s %02d: %s".format(it.prefijo, it.num, it.texto.replace("\n", " ").take(50))
                 }
-                col.addView(texto("📝 ${notasTipo.size} nota(s) — ver todas\n$ultimas", 12f).apply {
-                    setPadding(dp(12), dp(2), dp(12), dp(10))
+                col.addView(texto("${notasTipo.size} nota(s) · ver todas ›\n$ultimas", 12.5f).apply {
+                    setPadding(dp(16), dp(2), dp(12), dp(10))
+                    setCompoundDrawablesRelative(icono(R.drawable.ic_nota, C.tenue, 18), null, null, null)
+                    compoundDrawablePadding = dp(8)
                     setOnClickListener { verNotas(t.nombre, notasTipo) }
                 })
             }
@@ -385,13 +390,13 @@ class MainActivity : AppCompatActivity() {
         val t = tipos[ti]
         title = t.nombre
         val col = columna()
-        col.addView(texto("Paredes  (✎ para editar)", 14f, true))
+        col.addView(texto("Paredes", 14f, true))
 
         val conteo = contarFotos()
         t.paredes.forEachIndexed { pi, p ->
             val listos = (1..p.cantidad).count { estado(conteo[carpeta(t, p, it)]) == 2 }
-            col.addView(fila("${p.nombre}\n$listos / ${p.cantidad} completos",
-                { paredActual = pi; render() }) { menuPared(ti, pi) })
+            col.addView(fila("${p.nombre}\n$listos de ${p.cantidad} completas",
+                { paredActual = pi; render() }, listos to p.cantidad) { menuPared(ti, pi) })
         }
         col.addView(boton("＋ Agregar pared") { agregarPared(ti) })
         col.addView(espacio(16))
@@ -404,8 +409,7 @@ class MainActivity : AppCompatActivity() {
         val p = t.paredes[pi]
         title = "${t.prefijo} — ${p.nombre}"
         val col = columna()
-        col.addView(texto("Gris: sin fotos · Naranjo: incompleto · Verde: general + detalle · 📝 tiene nota", 12f))
-        col.addView(espacio(8))
+        col.addView(leyenda())
 
         val conteo = contarFotos()
         val conNota = carpetasConNota()
@@ -414,20 +418,26 @@ class MainActivity : AppCompatActivity() {
             val info = conteo[carpeta(t, p, n)]
             val total = info?.let { it.first + it.second } ?: 0
             grid.addView(Button(this).apply {
-                val nota = if (carpeta(t, p, n) in conNota) " 📝" else ""
-                text = "%s %02d\n%d 📷%s".format(t.prefijo, n, total, nota)
-                isAllCaps = false
-                setTextColor(Color.WHITE)
-                setBackgroundColor(when (estado(info)) {
-                    2 -> Color.parseColor("#2E7D32")
-                    1 -> Color.parseColor("#EF6C00")
-                    else -> Color.parseColor("#757575")
-                })
+                val nota = if (carpeta(t, p, n) in conNota) " · nota" else ""
+                val codigo = "%s %02d".format(t.prefijo, n)
+                val sub = if (total == 0) "sin fotos" else "$total foto${if (total == 1) "" else "s"}$nota"
+                text = android.text.SpannableString("$codigo\n$sub").apply {
+                    setSpan(android.text.style.RelativeSizeSpan(0.72f), codigo.length + 1, length, 0)
+                }
+                isAllCaps = false; typeface = medio; textSize = 16f
+                stateListAnimator = null; elevation = 0f
+                val est = estado(info)
+                setTextColor(if (est == 0) C.tinta else Color.WHITE)
+                background = when (est) {
+                    2 -> fondoRedondeado(C.ok, 12)
+                    1 -> fondoRedondeado(C.parcial, 12)
+                    else -> fondoRedondeado(C.superficie, 12, C.borde)
+                }
                 setOnClickListener { menuSingularidad(ti, pi, n, info) }
                 layoutParams = GridLayout.LayoutParams().apply {
                     width = 0; height = dp(84)
                     columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
-                    setMargins(dp(3), dp(3), dp(3), dp(3))
+                    setMargins(dp(4), dp(4), dp(4), dp(4))
                 }
             })
         }
@@ -435,6 +445,23 @@ class MainActivity : AppCompatActivity() {
         col.addView(espacio(16))
         col.addView(boton("← Volver a paredes") { paredActual = -1; render() })
         setContentView(scroll(col))
+    }
+
+    /** Leyenda de colores de la grilla de singularidades. */
+    private fun leyenda() = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(2), dp(4), 0, dp(10))
+        for ((color, borde, txt) in listOf(Triple(C.superficie, C.borde, "Sin fotos"), Triple(C.parcial, null, "Incompleta"),
+                                            Triple(C.ok, null, "General + detalle"))) {
+            addView(View(context).apply {
+                background = GradientDrawable().apply { cornerRadius = dp(4).toFloat(); setColor(color); borde?.let { setStroke(dp(1), it) } }
+                layoutParams = LinearLayout.LayoutParams(dp(14), dp(14)).apply { marginEnd = dp(6) }
+            })
+            addView(TextView(context).apply {
+                text = txt; textSize = 12.5f; setTextColor(C.tenue)
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(14) }
+            })
+        }
     }
 
     // ---------- Menús de edición ----------
@@ -1137,15 +1164,15 @@ class MainActivity : AppCompatActivity() {
     private fun pantallaTerreno() {
         title = "Notas en terreno — $evento"
         val col = columna()
-        col.addView(boton("📍  Nueva medición de espesores") { medicionTerreno() }.apply {
-            setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE); minHeight = dp(72); textSize = 17f
+        col.addView(boton("📍  Nueva medición de espesores", Estilo.PRIMARIO) { medicionTerreno() }.apply {
+            minHeight = dp(76); textSize = 17f
         })
         col.addView(texto("1. Foto de la zona   2. Toca cada punto medido   3. Valor con foto del medidor, " +
                           "escrito o dictado   4. Guardar: queda la foto con el espesor en cada punto.", 12f))
         col.addView(espacio(8))
 
         val meds = mediciones().filter { it.optString("origen") == "terreno" }.sortedByDescending { it.optLong("fecha") }
-        col.addView(texto("Mediciones (${meds.size})  — toca para ver, ✎ para editar o eliminar", 14f, true))
+        col.addView(texto("Mediciones (${meds.size})", 14f, true))
         if (meds.isEmpty()) col.addView(texto("Aún no hay mediciones.", 13f))
         meds.forEach { col.addView(filaMedicion(it)) }
 
@@ -1449,7 +1476,7 @@ class MainActivity : AppCompatActivity() {
         val s = sesionMed() ?: return
         menuGrande("Punto P${puntosDe(s).size + 1} — ¿cómo registras el valor?", listOf(
             "📷  Foto del medidor (lee el valor)" to { prepararPunto(x, y); fotoMedidor() },
-            "⌨️  Escribir o 🎤 dictar el valor" to { prepararPunto(x, y); dialogoPunto(null, "", "", -1) }))
+            "⌨️  Escribir o dictar el valor" to { prepararPunto(x, y); dialogoPunto(null, "", "", -1) }))
     }
 
     /** Guarda en la sesión la posición y el número del punto que se está agregando. */
@@ -1566,7 +1593,7 @@ class MainActivity : AppCompatActivity() {
         val dlg = AlertDialog.Builder(this).setTitle(titulo).setView(scroll(col))
             .setNegativeButton("Cancelar", null).create()
         opciones.forEach { (t, f) ->
-            col.addView(boton(t) { dlg.dismiss(); f() }.apply {
+            col.addView(boton(t, if (t.startsWith("🗑")) Estilo.PELIGRO else Estilo.SECUNDARIO) { dlg.dismiss(); f() }.apply {
                 minHeight = dp(72); textSize = 18f; gravity = Gravity.START or Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                     .apply { setMargins(0, dp(4), 0, dp(4)) }
@@ -1620,36 +1647,37 @@ class MainActivity : AppCompatActivity() {
 
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setPadding(dp(10), dp(8), dp(10), dp(10))
+            setBackgroundColor(C.oscuro)
         }
         col.addView(texto(when {
             moviendo >= 0 -> "Toca la nueva posición de P${moviendo + 1}"
             puntos.isEmpty() -> "Toca en la foto el punto donde mediste."
             else -> "Toca un lugar libre = nuevo punto · Toca un punto = menú · Arrastra un punto = moverlo"
-        }, 15f, true).apply { if (moviendo >= 0) setTextColor(Color.parseColor("#FF6D00")) })
+        }, 15f, true).apply { setTextColor(if (moviendo >= 0) C.acento else Color.WHITE); setPadding(dp(4), dp(4), dp(4), dp(8)) })
         if (bmp != null) {
             col.addView(VistaPuntos(bmp, puntos).apply {
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             })
         } else {
             col.addView(texto("Esperando la foto de la zona…", 14f).apply {
+                setTextColor(Color.WHITE)
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             })
         }
         val resumen = if (puntos.isEmpty()) "Sin puntos todavía"
             else puntos.mapIndexed { i, p -> "P${i + 1}: ${textoValor(p.valor)}" }.joinToString(" · ")
-        col.addView(texto(resumen, 15f, true))
+        col.addView(texto(resumen, 15f, true).apply { setTextColor(Color.parseColor("#E4EBF1")); setPadding(dp(4), dp(8), dp(4), dp(6)) })
         val filaBotones = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        filaBotones.addView(boton(if (moviendo >= 0) "✕ Cancelar mover" else "✕ Salir") {
+        filaBotones.addView(boton(if (moviendo >= 0) "✕ Cancelar mover" else "✕ Salir", Estilo.SECUNDARIO) {
             if (moviendo >= 0) { moviendo = -1; render() } else descartarMedicion()
         }.apply {
             layoutParams = LinearLayout.LayoutParams(0, dp(76), 1f).apply { marginEnd = dp(6) }
             textSize = 18f
         })
-        filaBotones.addView(boton("💾 Guardar (${puntos.size})") { guardarMedicion() }.apply {
+        filaBotones.addView(boton("💾 Guardar (${puntos.size})", Estilo.ACENTO) { guardarMedicion() }.apply {
             layoutParams = LinearLayout.LayoutParams(0, dp(76), 1f)
             textSize = 18f
-            setBackgroundColor(Color.parseColor("#2E7D32")); setTextColor(Color.WHITE)
         })
         col.addView(filaBotones)
         setContentView(col)
@@ -1978,8 +2006,8 @@ class MainActivity : AppCompatActivity() {
         val fila = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.parseColor("#E3E7EB"))
-            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = fondoRedondeado(C.superficie, 16, C.borde)
+            setPadding(dp(10), dp(10), dp(6), dp(10))
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 .apply { setMargins(0, dp(4), 0, dp(4)) }
             setOnClickListener { verMedicion(m) }
@@ -1989,7 +2017,11 @@ class MainActivity : AppCompatActivity() {
             ?.let { bmp ->
                 fila.addView(ImageView(this).apply {
                     setImageBitmap(bmp); scaleType = ImageView.ScaleType.CENTER_CROP
-                    layoutParams = LinearLayout.LayoutParams(dp(84), dp(84)).apply { marginEnd = dp(10) }
+                    outlineProvider = object : android.view.ViewOutlineProvider() {
+                        override fun getOutline(v: View, o: android.graphics.Outline) { o.setRoundRect(0, 0, v.width, v.height, dp(10).toFloat()) }
+                    }
+                    clipToOutline = true
+                    layoutParams = LinearLayout.LayoutParams(dp(84), dp(84)).apply { marginEnd = dp(12) }
                 })
             }
         val puntos = puntosDe(m)
@@ -1997,10 +2029,10 @@ class MainActivity : AppCompatActivity() {
         val valores = puntos.mapIndexed { i, p -> "P${i + 1} ${textoValor(p.valor)}" }.joinToString(" · ")
         fila.addView(texto("${nombreMedicion(m)} · ${puntos.size} punto(s)\n${fmtFecha.format(f)} ${fmtHora.format(f)}\n$valores", 13f)
             .apply {
-                setTextColor(Color.parseColor("#14202B"))
+                setTextColor(C.tinta)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
-        fila.addView(boton("✎") { menuMedicion(m) }.apply { layoutParams = LinearLayout.LayoutParams(dp(72), dp(72)); textSize = 20f })
+        fila.addView(botonIcono(R.drawable.ic_editar) { menuMedicion(m) })
         return fila
     }
 
@@ -2137,38 +2169,186 @@ class MainActivity : AppCompatActivity() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
+    // ---------- Estilo visual ----------
+    // Claro y de alto contraste para leer al sol; azul industrial con ámbar de acento;
+    // controles grandes para usar con guantes.
+
+    private object C {
+        val fondo = Color.parseColor("#EEF1F5")
+        val superficie = Color.WHITE
+        val borde = Color.parseColor("#D3DAE3")
+        val tinta = Color.parseColor("#0F1B2A")
+        val tenue = Color.parseColor("#5B6B7C")
+        val primario = Color.parseColor("#0E3A5F")
+        val primarioSuave = Color.parseColor("#E3ECF5")
+        val acento = Color.parseColor("#F5A300")
+        val ok = Color.parseColor("#1E8E5A")
+        val parcial = Color.parseColor("#D97706")
+        val vacio = Color.parseColor("#8A96A3")
+        val peligro = Color.parseColor("#C62828")
+        val oscuro = Color.parseColor("#0B1520")
+    }
+
+    enum class Estilo { PRIMARIO, ACENTO, SECUNDARIO, PELIGRO, PLANO }
+
+    private val medio: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+
+    /** Fondo redondeado con efecto al tocar. */
+    private fun fondoRedondeado(color: Int, radio: Int = 14, borde: Int? = null, ancho: Int = 1): android.graphics.drawable.Drawable {
+        val forma = GradientDrawable().apply {
+            cornerRadius = dp(radio).toFloat(); setColor(color); borde?.let { setStroke(dp(ancho), it) }
+        }
+        val mascara = GradientDrawable().apply { cornerRadius = dp(radio).toFloat(); setColor(Color.WHITE) }
+        return RippleDrawable(ColorStateList.valueOf(Color.argb(36, 14, 58, 95)), forma, mascara)
+    }
+
+    private val iconos = listOf(
+        "📷" to R.drawable.ic_camara, "🔍" to R.drawable.ic_detalle, "📝" to R.drawable.ic_nota,
+        "📍" to R.drawable.ic_punto, "📏" to R.drawable.ic_regla, "🏭" to R.drawable.ic_planta,
+        "💾" to R.drawable.ic_guardar, "📊" to R.drawable.ic_tabla, "🎤" to R.drawable.ic_microfono,
+        "✏️" to R.drawable.ic_editar, "✏" to R.drawable.ic_editar, "✎" to R.drawable.ic_editar,
+        "✋" to R.drawable.ic_mover, "🗑" to R.drawable.ic_borrar, "🖼" to R.drawable.ic_imagen,
+        "⌨️" to R.drawable.ic_teclado, "⌨" to R.drawable.ic_teclado, "←" to R.drawable.ic_volver,
+        "＋" to R.drawable.ic_agregar, "✕" to R.drawable.ic_cerrar, "✓" to R.drawable.ic_listo,
+        "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento)
+
+    /** Separa un emoji inicial del texto: (ícono, texto limpio). */
+    private fun separarIcono(s: String): Pair<Int?, String> {
+        val t = s.trimStart()
+        for ((e, ic) in iconos) if (t.startsWith(e)) return ic to t.removePrefix(e).trimStart('\uFE0F', ' ')
+        return null to s
+    }
+
+    private fun icono(res: Int, color: Int, tam: Int = 22) =
+        getDrawable(res)?.mutate()?.apply { setTint(color); setBounds(0, 0, dp(tam), dp(tam)) }
+
+    /** Ícono dentro de un cuadrado suave (para tarjetas). */
+    private fun insignia(res: Int, fondo: Int = C.primarioSuave, color: Int = C.primario) = ImageView(this).apply {
+        setImageDrawable(icono(res, color, 24))
+        scaleType = ImageView.ScaleType.CENTER
+        background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(fondo) }
+        layoutParams = LinearLayout.LayoutParams(dp(46), dp(46)).apply { marginEnd = dp(14) }
+    }
+
     private fun columna() = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(16), dp(16), dp(16))
+        setPadding(dp(16), dp(14), dp(16), dp(20))
     }
 
-    private fun scroll(v: View) = ScrollView(this).apply { addView(v) }
+    private fun scroll(v: View) = ScrollView(this).apply { addView(v); isFillViewport = true }
 
+    /** Texto. En negrita y 14 sp se usa como encabezado de sección. */
     private fun texto(s: String, size: Float, negrita: Boolean = false) = TextView(this).apply {
-        text = s; textSize = size
-        if (negrita) setTypeface(typeface, Typeface.BOLD)
-        setPadding(0, dp(4), 0, dp(4))
-    }
-
-    private fun boton(s: String, onClick: () -> Unit) = Button(this).apply {
-        text = s; isAllCaps = false; gravity = Gravity.CENTER
-        textSize = 16f; minHeight = dp(60)
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-    }
-
-    /** Fila con botón principal + botón ✎ de edición. */
-    private fun fila(s: String, onClick: () -> Unit, onEditar: () -> Unit) =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(boton(s, onClick).apply {
-                layoutParams = LinearLayout.LayoutParams(0, dp(88), 1f)
-            })
-            addView(boton("✎", onEditar).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(76), dp(88))
-            })
+        text = s
+        if (negrita && size == 14f) {
+            text = s.replace(Regex("\\s*\\(✎[^)]*\\)"), "").uppercase(Locale.getDefault()); textSize = 12.5f; letterSpacing = 0.08f
+            typeface = medio; setTextColor(C.tenue); setPadding(dp(2), dp(16), 0, dp(6))
+        } else {
+            textSize = size
+            if (negrita) typeface = medio
+            setTextColor(if (negrita || size >= 14f) C.tinta else C.tenue)
+            setLineSpacing(0f, 1.15f)
+            setPadding(0, dp(4), 0, dp(4))
         }
+    }
+
+    private fun boton(s: String, estilo: Estilo = Estilo.SECUNDARIO, onClick: () -> Unit) = Button(this).apply {
+        val (ic, t) = separarIcono(s)
+        text = t; isAllCaps = false
+        gravity = if (ic != null) Gravity.START or Gravity.CENTER_VERTICAL else Gravity.CENTER
+        textSize = 16f; minHeight = dp(60); minimumHeight = dp(60)
+        typeface = medio; letterSpacing = 0.01f
+        stateListAnimator = null; elevation = 0f
+        setPadding(dp(18), dp(10), dp(18), dp(10))
+        val (bg, fg) = when (estilo) {
+            Estilo.PRIMARIO -> C.primario to Color.WHITE
+            Estilo.ACENTO -> C.acento to C.tinta
+            Estilo.SECUNDARIO -> C.superficie to C.primario
+            Estilo.PELIGRO -> C.superficie to C.peligro
+            Estilo.PLANO -> Color.TRANSPARENT to C.primario
+        }
+        val borde = when (estilo) {
+            Estilo.SECUNDARIO -> C.borde
+            Estilo.PELIGRO -> Color.parseColor("#F0C4C4")
+            else -> null
+        }
+        background = fondoRedondeado(bg, 14, borde)
+        setTextColor(fg)
+        ic?.let { r -> setCompoundDrawablesRelative(icono(r, fg), null, null, null); compoundDrawablePadding = dp(12) }
+        setOnClickListener { onClick() }
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            .apply { setMargins(0, dp(5), 0, dp(5)) }
+    }
+
+    /** Botón redondo solo con ícono (editar, etc.). */
+    private fun botonIcono(res: Int, color: Int = C.tenue, onClick: () -> Unit) = ImageView(this).apply {
+        setImageDrawable(icono(res, color, 24))
+        scaleType = ImageView.ScaleType.CENTER
+        background = RippleDrawable(ColorStateList.valueOf(Color.argb(40, 14, 58, 95)), null,
+            GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) })
+        isClickable = true; setOnClickListener { onClick() }
+        layoutParams = LinearLayout.LayoutParams(dp(60), dp(60))
+    }
+
+    /**
+     * Tarjeta de lista: ícono, título (primera línea), detalle (resto) y botón de editar.
+     * "● " al inicio marca el elemento activo. [progreso] dibuja una barra (hechos, total).
+     */
+    private fun fila(s: String, onClick: () -> Unit, progreso: Pair<Int, Int>? = null, onEditar: () -> Unit): View {
+        var (ic, t) = separarIcono(s)
+        val activo = t.startsWith("● ")
+        if (activo) t = t.removePrefix("● ")
+        val tarjeta = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = fondoRedondeado(C.superficie, 16, if (activo) C.primario else C.borde, if (activo) 2 else 1)
+            minimumHeight = dp(84)
+            setPadding(dp(16), dp(12), dp(6), dp(12))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { setMargins(0, dp(5), 0, dp(5)) }
+            isClickable = true; setOnClickListener { onClick() }
+        }
+        ic?.let { tarjeta.addView(insignia(it)) }
+        val textos = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val fila1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        fila1.addView(TextView(this).apply {
+            text = t.substringBefore('\n'); textSize = 17f; typeface = medio; setTextColor(C.tinta)
+        })
+        if (activo) fila1.addView(TextView(this).apply {
+            text = "ACTIVO"; textSize = 10.5f; typeface = medio; letterSpacing = 0.08f; setTextColor(C.primario)
+            background = GradientDrawable().apply { cornerRadius = dp(8).toFloat(); setColor(C.primarioSuave) }
+            setPadding(dp(8), dp(2), dp(8), dp(2))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { marginStart = dp(8) }
+        })
+        textos.addView(fila1)
+        val detalle = t.substringAfter('\n', "")
+        if (detalle.isNotBlank()) textos.addView(TextView(this).apply {
+            text = detalle; textSize = 13.5f; setTextColor(C.tenue); setLineSpacing(0f, 1.1f)
+            setPadding(0, dp(3), 0, 0)
+        })
+        progreso?.let { (hechos, total) -> textos.addView(barra(hechos, total)) }
+        tarjeta.addView(textos)
+        tarjeta.addView(botonIcono(R.drawable.ic_editar) { onEditar() })
+        return tarjeta
+    }
+
+    /** Barra de avance delgada (verde al completar). */
+    private fun barra(hechos: Int, total: Int) = FrameLayout(this).apply {
+        val f = if (total > 0) hechos.toFloat() / total else 0f
+        background = GradientDrawable().apply { cornerRadius = dp(3).toFloat(); setColor(C.primarioSuave) }
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(6)).apply { topMargin = dp(8); marginEnd = dp(8) }
+        addView(View(context).apply {
+            background = GradientDrawable().apply { cornerRadius = dp(3).toFloat(); setColor(if (f >= 1f) C.ok else C.primario) }
+        }, FrameLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT))
+        addOnLayoutChangeListener { v, l, _, r, _, _, _, _, _ ->
+            val hijo = (v as FrameLayout).getChildAt(0)
+            val w = ((r - l) * f).toInt()
+            if (hijo.layoutParams.width != w) post { hijo.layoutParams = hijo.layoutParams.apply { width = w }; hijo.requestLayout() }
+        }
+    }
 
     private fun espacio(h: Int) = View(this).apply {
         layoutParams = LinearLayout.LayoutParams(1, dp(h))

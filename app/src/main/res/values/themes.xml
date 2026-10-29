@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tema claro de alto contraste (legible al sol), azul industrial + ámbar -->
+    <style name="Theme.BoilerImage" parent="Theme.AppCompat.Light.DarkActionBar">
+        <item name="colorPrimary">#0E3A5F</item>
+        <item name="colorPrimaryDark">#0A2C49</item>
+        <item name="colorAccent">#0E3A5F</item>
+        <item name="colorControlActivated">#0E3A5F</item>
+        <item name="android:windowBackground">@color/fondo</item>
+        <item name="android:textColorPrimary">#0F1B2A</item>
+        <item name="android:textColorSecondary">#5B6B7C</item>
+        <item name="actionBarStyle">@style/BarraSuperior</item>
+        <item name="alertDialogTheme">@style/Dialogo</item>
+        <item name="android:navigationBarColor">#0A2C49</item>
+    </style>
+
+    <style name="BarraSuperior" parent="Widget.AppCompat.Light.ActionBar.Solid.Inverse">
+        <item name="background">@color/primario</item>
+        <item name="elevation">0dp</item>
+        <item name="titleTextStyle">@style/TituloBarra</item>
+    </style>
+
+    <style name="TituloBarra" parent="TextAppearance.AppCompat.Widget.ActionBar.Title.Inverse">
+        <item name="android:textSize">19sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+    </style>
+
+    <style name="Dialogo" parent="Theme.AppCompat.Light.Dialog.Alert">
+        <item name="colorAccent">#0E3A5F</item>
+        <item name="android:textColorPrimary">#0F1B2A</item>
+        <item name="dialogCornerRadius">20dp</item>
+        <item name="android:dialogCornerRadius">20dp</item>
+    </style>
+</resources>
