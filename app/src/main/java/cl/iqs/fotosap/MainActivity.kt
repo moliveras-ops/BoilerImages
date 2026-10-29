@@ -1646,6 +1646,7 @@ class MainActivity : AppCompatActivity() {
             dlg.dismiss()
             if (existente == null) uriMedidor?.let { runCatching { contentResolver.delete(it, null, null) } }
         }.apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) })
+        for (k in 0 until fila2.childCount) (fila2.getChildAt(k) as Button).apply { textSize = 15f; maxLines = 1; setPadding(dp(12), 0, dp(12), 0) }
         col.addView(fila2)
         dlg.show()
     }
