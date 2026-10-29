@@ -51,6 +51,20 @@ class MainActivity : AppCompatActivity() {
     // Campo de texto de la nota abierta (para insertar lo dictado)
     private var notaEditando: EditText? = null
 
+    // Elegir archivo de respaldo para restaurar
+    private val abrirRespaldo = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) restaurarDesde(uri)
+    }
+
+    // Respaldo automático cada vez que cambia la configuración
+    private var respaldoPendiente = false
+    private val alCambiarPrefs = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, clave ->
+        if (clave == null || clave.startsWith("pend") || respaldoPendiente) return@OnSharedPreferenceChangeListener
+        respaldoPendiente = true
+        android.os.Handler(android.os.Looper.getMainLooper())
+            .postDelayed({ respaldoPendiente = false; respaldar(false) }, 1500)
+    }
+
     private val dictado = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         val txt = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
         val et = notaEditando
@@ -103,6 +117,7 @@ class MainActivity : AppCompatActivity() {
         enCalderas = savedInstanceState?.getBoolean("enCalderas", false) ?: false
         plantaActual = savedInstanceState?.getString("plantaActual")
         migrarCalderas()
+        prefs.registerOnSharedPreferenceChangeListener(alCambiarPrefs)
         cargar()
         enEvento = savedInstanceState?.getBoolean("enEvento", false) ?: false
         enTerreno = savedInstanceState?.getBoolean("enTerreno", false) ?: false
@@ -259,6 +274,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(boton("🏭  Plantas y calderas (${plantas().size} plantas · ${calderas().size} calderas)") {
             enCalderas = true; plantaActual = null; render()
         })
+        col.addView(boton("💾  Respaldo y restauración") { menuRespaldo() })
         col.addView(espacio(20))
         col.addView(texto("Carpeta en el teléfono:\nAlmacenamiento interno > $raiz", 13f))
         setContentView(scroll(col))
@@ -584,7 +600,11 @@ class MainActivity : AppCompatActivity() {
         try {
             val uri = existente ?: contentResolver.insert(coleccion, ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
-                put(MediaStore.MediaColumns.MIME_TYPE, if (nombre.endsWith(".csv")) "text/csv" else "text/plain")
+                put(MediaStore.MediaColumns.MIME_TYPE, when {
+                    nombre.endsWith(".csv") -> "text/csv"
+                    nombre.endsWith(".json") -> "application/json"
+                    else -> "text/plain"
+                })
                 put(MediaStore.MediaColumns.RELATIVE_PATH, ruta)
             }) ?: run { aviso("No se pudo guardar $nombre"); return }
             contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { it.write(texto + "\n") }
@@ -623,6 +643,78 @@ class MainActivity : AppCompatActivity() {
         }
         escribirTexto("$raiz/$evento/${t.nombre}/${p.nombre}/", "Resumen notas.txt",
             if (hay) sb.toString().trim() else "")
+    }
+
+    // ---------- Respaldo y restauración ----------
+    // Guarda plantas, calderas, eventos, su configuración y las notas en terreno en un .json.
+
+    private val archivoRespaldo = "Respaldo BoilerImage.json"
+
+    private fun menuRespaldo() {
+        AlertDialog.Builder(this)
+            .setTitle("Respaldo y restauración")
+            .setMessage("El respaldo se actualiza solo cada vez que cambias algo, en:\n" +
+                        "$raiz/$archivoRespaldo\n\n" +
+                        "Incluye plantas, calderas, eventos y notas en terreno. Las fotos y notas " +
+                        "de singularidades ya están como archivos en la carpeta.\n\n" +
+                        "Para cambiar de teléfono: copia ese archivo al teléfono nuevo y usa Restaurar.")
+            .setPositiveButton("Respaldar ahora") { _, _ -> respaldar(true) }
+            .setNeutralButton("Restaurar…") { _, _ ->
+                aviso("Elige el archivo $archivoRespaldo")
+                runCatching { abrirRespaldo.launch(arrayOf("application/json", "application/octet-stream", "*/*")) }
+            }
+            .setNegativeButton("Cerrar", null)
+            .show()
+    }
+
+    private fun respaldar(avisar: Boolean) {
+        val o = JSONObject()
+        o.put("app", "BoilerImage").put("version", 1).put("fecha", System.currentTimeMillis())
+        val datos = JSONObject()
+        for ((k, v) in prefs.all) {
+            if (k.startsWith("pend") || v == null) continue
+            val t = when (v) {
+                is String -> "s"; is Int -> "i"; is Long -> "l"; is Boolean -> "b"; is Float -> "f"
+                else -> continue
+            }
+            datos.put(k, JSONObject().put("t", t).put("v", v))
+        }
+        o.put("datos", datos)
+        escribirTexto("$raiz/", archivoRespaldo, o.toString(2))
+        if (avisar) aviso("Respaldo guardado en $raiz/$archivoRespaldo")
+    }
+
+    private fun restaurarDesde(uri: Uri) {
+        val o = runCatching { JSONObject(leerTexto(uri)) }.getOrNull()
+        val datos = o?.optJSONObject("datos")
+        if (o == null || o.optString("app") != "BoilerImage" || datos == null) {
+            aviso("Ese archivo no es un respaldo de BoilerImage"); return
+        }
+        val fecha = SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date(o.optLong("fecha")))
+        confirmar("¿Restaurar el respaldo del $fecha?\n\nReemplaza plantas, calderas, eventos y notas en " +
+                  "terreno actuales. Las fotos no se tocan.") {
+            prefs.unregisterOnSharedPreferenceChangeListener(alCambiarPrefs)
+            val ed = prefs.edit().clear()
+            for (k in datos.keys()) {
+                val e = datos.optJSONObject(k) ?: continue
+                when (e.optString("t")) {
+                    "s" -> ed.putString(k, e.optString("v"))
+                    "i" -> ed.putInt(k, e.optInt("v"))
+                    "l" -> ed.putLong(k, e.optLong("v"))
+                    "b" -> ed.putBoolean(k, e.optBoolean("v"))
+                    "f" -> ed.putFloat(k, e.optDouble("v").toFloat())
+                }
+            }
+            ed.commit()
+            prefs.registerOnSharedPreferenceChangeListener(alCambiarPrefs)
+            migrarCalderas()
+            plantilla = null; plantaActual = null; enCalderas = false; enTerreno = false
+            enEvento = false; tipoActual = -1; paredActual = -1
+            cargar()
+            respaldar(false)
+            aviso("Respaldo restaurado")
+            render()
+        }
     }
 
     // ---------- Plantas y calderas (plantillas) ----------
