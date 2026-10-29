@@ -124,6 +124,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        capturarErrores()
         plantilla = savedInstanceState?.getString("plantilla")
         enCalderas = savedInstanceState?.getBoolean("enCalderas", false) ?: false
         plantaActual = savedInstanceState?.getString("plantaActual")
@@ -150,6 +151,52 @@ class MainActivity : AppCompatActivity() {
             }
         })
         render()
+        avisarErrorPrevio()
+    }
+
+    // ---------- Registro de errores ----------
+    // Si la app se cierra por un error, guarda el detalle. Al abrir de nuevo lo muestra, lo deja en
+    // "Error BoilerImage.txt" y pausa la medición en curso para que la app no vuelva a caerse.
+
+    private fun capturarErrores() {
+        val previo = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { hilo, e ->
+            runCatching {
+                val sw = java.io.StringWriter()
+                e.printStackTrace(java.io.PrintWriter(sw))
+                val version = packageManager.getPackageInfo(packageName, 0).versionName
+                val ed = prefs.edit().putString("pendError",
+                    "BoilerImage $version · ${SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date())}\n$sw")
+                prefs.getString("pendMed", null)?.let { ed.putString("pendMedPausada", it).remove("pendMed") }
+                ed.commit()
+            }
+            previo?.uncaughtException(hilo, e)
+        }
+    }
+
+    private fun avisarErrorPrevio() {
+        val err = prefs.getString("pendError", null) ?: return
+        prefs.edit().remove("pendError").apply()
+        escribirTexto("$raiz/", "Error BoilerImage.txt", err)
+        val pausada = prefs.getString("pendMedPausada", null)
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("La app se cerró por un error")
+            .setMessage("Quedó guardado en $raiz/Error BoilerImage.txt. Envíaselo a Claude para corregirlo.\n\n" +
+                        err.lines().take(6).joinToString("\n") +
+                        if (pausada != null) "\n\nHabía una medición en curso." else "")
+            .setPositiveButton("Copiar error") { _, _ ->
+                val cb = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cb.setPrimaryClip(android.content.ClipData.newPlainText("Error BoilerImage", err))
+                aviso("Error copiado: pégalo en el chat")
+            }
+            .setNegativeButton("Cerrar", null)
+        if (pausada != null) {
+            dlg.setNeutralButton("Recuperar medición") { _, _ ->
+                prefs.edit().putString("pendMed", pausada).remove("pendMedPausada").apply(); render()
+            }
+            dlg.setOnDismissListener { prefs.edit().remove("pendMedPausada").apply() }
+        }
+        dlg.show()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -1688,25 +1735,26 @@ class MainActivity : AppCompatActivity() {
                 MotionEvent.ACTION_UP -> {
                     performClick()
                     val i = arrastre
+                    val fueMovido = movido
                     arrastre = -1
-                    when {
-                        i >= 0 && movido -> moverPunto(i, puntos[i].x, puntos[i].y)
-                        i >= 0 -> menuPunto(i)
-                        moviendo >= 0 && dst.contains(e.x, e.y) -> {
-                            val (nx, ny) = aImagen(e.x, e.y)
-                            val m = moviendo; moviendo = -1
-                            moverPunto(m, nx, ny)
-                        }
-                        dst.contains(e.x, e.y) -> {
-                            val (nx, ny) = aImagen(e.x, e.y)
-                            nuevoPunto(nx, ny)
-                        }
-                    }
+                    // Cambiar la pantalla dentro del evento táctil cierra la app: se hace al terminar
+                    val ex = e.x; val ey = e.y
+                    post { alSoltar(i, fueMovido, ex, ey) }
                     invalidate()
                 }
-                MotionEvent.ACTION_CANCEL -> { arrastre = -1; render() }
+                MotionEvent.ACTION_CANCEL -> { arrastre = -1; post { render() } }
             }
             return true
+        }
+
+        private fun alSoltar(i: Int, movido: Boolean, x: Float, y: Float) {
+            val (nx, ny) = aImagen(x, y)
+            when {
+                i >= 0 && movido -> moverPunto(i, puntos[i].x, puntos[i].y)
+                i >= 0 -> menuPunto(i)
+                moviendo >= 0 && dst.contains(x, y) -> { val m = moviendo; moviendo = -1; moverPunto(m, nx, ny) }
+                dst.contains(x, y) -> nuevoPunto(nx, ny)
+            }
         }
 
         override fun performClick(): Boolean = super.performClick()
