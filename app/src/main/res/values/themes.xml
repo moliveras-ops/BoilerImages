@@ -18,11 +18,17 @@
         <item name="background">@color/primario</item>
         <item name="elevation">0dp</item>
         <item name="titleTextStyle">@style/TituloBarra</item>
+        <item name="subtitleTextStyle">@style/SubtituloBarra</item>
     </style>
 
     <style name="TituloBarra" parent="TextAppearance.AppCompat.Widget.ActionBar.Title.Inverse">
         <item name="android:textSize">19sp</item>
         <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textColor">#FFFFFF</item>
+    </style>
+
+    <style name="SubtituloBarra" parent="TextAppearance.AppCompat.Widget.ActionBar.Subtitle.Inverse">
+        <item name="android:textColor">#CFDCEA</item>
     </style>
 
     <style name="Dialogo" parent="Theme.AppCompat.Light.Dialog.Alert">

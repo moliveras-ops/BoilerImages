@@ -129,6 +129,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         capturarErrores()
+        supportActionBar?.apply {
+            // Logo de BoilerImage junto al título de cada pantalla
+            setDisplayShowHomeEnabled(true); setDisplayUseLogoEnabled(true)
+            setLogo(android.graphics.drawable.InsetDrawable(logo(34), 0, 0, dp(12), 0))
+        }
         plantilla = savedInstanceState?.getString("plantilla")
         enCalderas = savedInstanceState?.getBoolean("enCalderas", false) ?: false
         plantaActual = savedInstanceState?.getString("plantaActual")
@@ -310,8 +315,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun pantallaEventos() {
-        title = "BoilerImage — Eventos"
+        title = "BoilerImage"
         val col = columna()
+        col.addView(cabecera())
         val activo = eventoActivo()
         val etiqueta = if (activo == null) "📏  Notas en terreno\nElige un evento"
                        else "📏  Notas en terreno\n$activo · ${mediciones().count { it.optString("origen") == "terreno" }} mediciones"
@@ -2172,6 +2178,36 @@ class MainActivity : AppCompatActivity() {
     // ---------- Helpers de UI ----------
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    /** Ícono de la app (el mismo del teléfono) como imagen de [tamDp]. */
+    private fun logo(tamDp: Int): android.graphics.drawable.Drawable {
+        val px = dp(tamDp)
+        val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        c.clipPath(android.graphics.Path().apply {
+            addRoundRect(RectF(0f, 0f, px.toFloat(), px.toFloat()), px * 0.28f, px * 0.28f, android.graphics.Path.Direction.CW)
+        })
+        getDrawable(R.mipmap.ic_launcher)?.apply { setBounds(0, 0, px, px); draw(c) }
+        return android.graphics.drawable.BitmapDrawable(resources, bmp)
+    }
+
+    /** Cabecera de la pantalla principal con el ícono y el nombre de la app. */
+    private fun cabecera() = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(4), dp(6), dp(4), dp(14))
+        addView(ImageView(context).apply {
+            setImageDrawable(logo(64))
+            layoutParams = LinearLayout.LayoutParams(dp(64), dp(64)).apply { marginEnd = dp(14) }
+        })
+        addView(LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(context).apply { text = "BoilerImage"; textSize = 24f; typeface = medio; setTextColor(C.primario) })
+            addView(TextView(context).apply {
+                val v = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull() ?: ""
+                text = "Fotos, notas y espesores de inspección · v$v"; textSize = 13f; setTextColor(C.tenue)
+            })
+        })
+    }
 
     // ---------- Estilo visual ----------
     // Claro y de alto contraste para leer al sol; azul industrial con ámbar de acento;
