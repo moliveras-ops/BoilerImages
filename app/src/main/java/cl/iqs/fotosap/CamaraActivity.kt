@@ -130,6 +130,9 @@ class CamaraActivity : AppCompatActivity() {
         window.statusBarColor = oscuro
         window.navigationBarColor = oscuro
         construir()
+        if (!prefs.getBoolean("cam_aviso_volumen", false)) {
+            aviso("También disparan las teclas de volumen"); prefs.edit().putBoolean("cam_aviso_volumen", true).apply()
+        }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() = terminar()
         })
@@ -172,6 +175,12 @@ class CamaraActivity : AppCompatActivity() {
         setOnClickListener { f() }
     }
 
+    private fun chipChico(f: () -> Unit) = TextView(this).apply {
+        textSize = 13f; typeface = medio; gravity = Gravity.CENTER; setTextColor(Color.WHITE); maxLines = 1
+        background = fondo(gris, 20); setPadding(dp(10), 0, dp(10), 0); isClickable = true
+        setOnClickListener { f() }
+    }
+
     private fun botonRedondo(res: Int, tam: Int, f: () -> Unit) = ImageView(this).apply {
         setImageDrawable(icono(res, Color.WHITE, tam / 2 - 4))
         scaleType = ImageView.ScaleType.CENTER
@@ -197,77 +206,74 @@ class CamaraActivity : AppCompatActivity() {
         }
         raiz.addView(anilloFoco, FrameLayout.LayoutParams(dp(84), dp(84)))
 
-        // --- Arriba: código, conteo, navegación y modo ---
+        // --- Arriba (compacto): cerrar, código, conteo, resolución/modo; luego navegación + General/Detalle ---
         val arriba = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setBackgroundColor(panel); setPadding(dp(12), dp(8), dp(12), dp(10))
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(panel); setPadding(dp(8), dp(6), dp(8), dp(6))
         }
         val fila1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        fila1.addView(botonRedondo(R.drawable.ic_cerrar, 56) { terminar() })
+        fila1.addView(botonRedondo(R.drawable.ic_cerrar, 44) { terminar() })
         val textos = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, 0, 0)
+            orientation = LinearLayout.VERTICAL; setPadding(dp(10), 0, dp(6), 0)
         }
-        txtTitulo = TextView(this).apply { textSize = 22f; typeface = medio; setTextColor(Color.WHITE); maxLines = 1 }
-        txtConteo = TextView(this).apply { textSize = 14f; setTextColor(Color.parseColor("#C9D3DD")) }
+        txtTitulo = TextView(this).apply {
+            textSize = 18f; typeface = medio; setTextColor(Color.WHITE); maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        txtConteo = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#C9D3DD")); maxLines = 1 }
         textos.addView(txtTitulo); textos.addView(txtConteo)
         fila1.addView(textos, LinearLayout.LayoutParams(0, -2, 1f))
+        btnRes = chipChico { cambiarResolucion() }
+        btnExt = chipChico { cambiarExtension() }
+        fila1.addView(btnRes, LinearLayout.LayoutParams(-2, dp(40)).apply { marginEnd = dp(6) })
+        fila1.addView(btnExt, LinearLayout.LayoutParams(-2, dp(40)))
         arriba.addView(fila1)
 
-        val fila2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(8), 0, 0) }
+        val fila2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(6), 0, 0) }
+        btnAnterior = chip("") { saltar(-1) }
         btnGeneral = chip("General") { cambiarModo("general") }
         btnDetalle = chip("Detalle") { cambiarModo("detalle") }
-        fila2.addView(btnGeneral, LinearLayout.LayoutParams(0, dp(56), 1f).apply { marginEnd = dp(6) })
-        fila2.addView(btnDetalle, LinearLayout.LayoutParams(0, dp(56), 1f))
-        arriba.addView(fila2)
-        val fila3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(6), 0, 0) }
-        btnAnterior = chip("") { saltar(-1) }
         btnSiguiente = chip("") { saltar(1) }
-        fila3.addView(btnAnterior, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginEnd = dp(6) })
-        fila3.addView(btnSiguiente, LinearLayout.LayoutParams(0, dp(52), 1f))
-        arriba.addView(fila3)
+        for (b in listOf(btnAnterior, btnGeneral, btnDetalle, btnSiguiente)) {
+            b.textSize = 15f; b.setPadding(dp(4), 0, dp(4), 0); b.ellipsize = android.text.TextUtils.TruncateAt.END
+            fila2.addView(b, LinearLayout.LayoutParams(0, dp(48), 1f).apply { if (b !== btnSiguiente) marginEnd = dp(5) })
+        }
+        arriba.addView(fila2)
         raiz.addView(arriba, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
 
-        // --- Abajo: opciones, lentes y disparador ---
+        // --- Abajo: lentes flotando sobre la imagen y fila de disparo ---
         val abajo = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
-            setBackgroundColor(panel); setPadding(dp(12), dp(10), dp(12), dp(18))
         }
-        val opciones = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        btnRes = chip("") { cambiarResolucion() }
-        btnExt = chip("") { cambiarExtension() }
-        opciones.addView(btnRes, LinearLayout.LayoutParams(-2, dp(48)).apply { marginEnd = dp(8) })
-        opciones.addView(btnExt, LinearLayout.LayoutParams(-2, dp(48)))
-        abajo.addView(opciones)
-        filaLentes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, dp(10), 0, dp(10)) }
+        filaLentes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(8)) }
         abajo.addView(filaLentes)
 
-        val filaDisparo = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val filaDisparo = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(panel); setPadding(dp(16), dp(8), dp(16), dp(10))
+        }
         miniatura = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(gris); setStroke(dp(2), Color.WHITE) }
+            background = GradientDrawable().apply { cornerRadius = dp(10).toFloat(); setColor(gris); setStroke(dp(2), Color.WHITE) }
             clipToOutline = true
             outlineProvider = object : android.view.ViewOutlineProvider() {
-                override fun getOutline(v: View, o: android.graphics.Outline) { o.setRoundRect(0, 0, v.width, v.height, dp(12).toFloat()) }
+                override fun getOutline(v: View, o: android.graphics.Outline) { o.setRoundRect(0, 0, v.width, v.height, dp(10).toFloat()) }
             }
             setOnClickListener { revisarUltima() }
         }
-        filaDisparo.addView(miniatura, LinearLayout.LayoutParams(dp(68), dp(68)))
+        filaDisparo.addView(miniatura, LinearLayout.LayoutParams(dp(54), dp(54)))
         filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         val disparador = View(this).apply {
             background = RippleDrawable(ColorStateList.valueOf(Color.argb(90, 0, 0, 0)),
-                GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE); setStroke(dp(6), acento) },
+                GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE); setStroke(dp(5), acento) },
                 GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) })
-            isClickable = true; contentDescription = "Tomar foto"
+            isClickable = true; contentDescription = "Tomar foto (también las teclas de volumen)"
             setOnClickListener { disparar() }
         }
-        filaDisparo.addView(disparador, LinearLayout.LayoutParams(dp(96), dp(96)))
+        filaDisparo.addView(disparador, LinearLayout.LayoutParams(dp(76), dp(76)))
         filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        btnLinterna = botonRedondo(R.drawable.ic_linterna, 68) { alternarLinterna() }
+        btnLinterna = botonRedondo(R.drawable.ic_linterna, 54) { alternarLinterna() }
         filaDisparo.addView(btnLinterna)
         abajo.addView(filaDisparo, LinearLayout.LayoutParams(-1, -2))
-        abajo.addView(TextView(this).apply {
-            text = "También disparan las teclas de volumen"; textSize = 12f; setTextColor(Color.parseColor("#9FB0C0"))
-            gravity = Gravity.CENTER; setPadding(0, dp(8), 0, 0)
-        })
         raiz.addView(abajo, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
 
         // Gestos sobre la vista previa: tocar = enfocar, pellizcar = zoom
@@ -300,7 +306,7 @@ class CamaraActivity : AppCompatActivity() {
         val nombres = nombresEn(rutas[indice])
         val g = nombres.count { it.contains("_general_") && !it.contains("_marcada") }
         val d = nombres.count { it.contains("_detalle_") && !it.contains("_marcada") }
-        txtConteo.text = "Generales: $g · Detalles: $d" + if (fotosTomadas > 0) "   ·   $fotosTomadas en esta sesión" else ""
+        txtConteo.text = "Gen: $g · Det: $d" + if (fotosTomadas > 0) "  ·  $fotosTomadas en sesión" else ""
         // solo el código; si el salto cambia de pared, se agrega la pared (en otra línea)
         fun etiqueta(j: Int): String {
             val pared = titulos[j].substringAfter(" · ")
@@ -308,18 +314,18 @@ class CamaraActivity : AppCompatActivity() {
         }
         btnAnterior.text = if (indice > 0) "‹  ${etiqueta(indice - 1)}" else "—"
         btnSiguiente.text = if (indice < rutas.size - 1) "${etiqueta(indice + 1)}  ›" else "—"
-        for (b in listOf(btnAnterior, btnSiguiente)) { b.maxLines = 2; b.textSize = if (b.text.contains('\n')) 13f else 17f }
+        for (b in listOf(btnAnterior, btnSiguiente)) { b.maxLines = 2; b.textSize = if (b.text.contains('\n')) 11f else 15f }
         btnAnterior.alpha = if (indice > 0) 1f else 0.35f
         btnSiguiente.alpha = if (indice < rutas.size - 1) 1f else 0.35f
         estiloChip(btnGeneral, modo == "general")
         estiloChip(btnDetalle, modo == "detalle")
-        btnRes.text = if (prefs.getString("cam_res", "normal") == "max") "Resolución: máxima" else "Resolución: 12 MP"
-        btnExt.text = "Modo: " + nombreExt(extActual)
+        btnRes.text = if (prefs.getString("cam_res", "normal") == "max") "Máx" else "12 MP"
+        btnExt.text = nombreExt(extActual)
         btnExt.visibility = if (extDisponibles.size > 1) View.VISIBLE else View.GONE
         btnLinterna.background = RippleDrawable(ColorStateList.valueOf(Color.argb(60, 255, 255, 255)),
             GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (linterna) acento else gris) },
             GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) })
-        btnLinterna.setImageDrawable(icono(R.drawable.ic_linterna, if (linterna) tinta else Color.WHITE, 30))
+        btnLinterna.setImageDrawable(icono(R.drawable.ic_linterna, if (linterna) tinta else Color.WHITE, 24))
     }
 
     private fun nombreExt(m: Int) = when (m) { ExtensionMode.HDR -> "HDR"; ExtensionMode.NIGHT -> "Noche"; else -> "Normal" }
@@ -440,12 +446,12 @@ class CamaraActivity : AppCompatActivity() {
             val activo = o == cercano && Math.abs(actual - o) < 0.15f * o
             filaLentes.addView(TextView(this).apply {
                 text = (if (o % 1f == 0f) "${o.toInt()}" else "%.1f".format(o).replace('.', ',')) + "×"
-                textSize = 16f; typeface = medio; gravity = Gravity.CENTER
+                textSize = 13f; typeface = medio; gravity = Gravity.CENTER
                 setTextColor(if (activo) tinta else Color.WHITE)
-                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (activo) acento else gris) }
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (activo) acento else panel) }
                 isClickable = true
                 setOnClickListener { c.cameraControl.setZoomRatio(o) }
-                layoutParams = LinearLayout.LayoutParams(dp(60), dp(60)).apply { setMargins(dp(6), 0, dp(6), 0) }
+                layoutParams = LinearLayout.LayoutParams(dp(46), dp(46)).apply { setMargins(dp(5), 0, dp(5), 0) }
             })
         }
     }
