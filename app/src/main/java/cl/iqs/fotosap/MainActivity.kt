@@ -233,6 +233,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(texto("Tipos de singularidad  (✎ para editar)", 14f, true))
 
         val conteo = contarFotos()
+        val notas = todasLasNotas()
         tipos.forEachIndexed { i, t ->
             val total = t.paredes.sumOf { it.cantidad }
             val listos = t.paredes.sumOf { p ->
@@ -240,8 +241,23 @@ class MainActivity : AppCompatActivity() {
             }
             col.addView(fila("${t.nombre}\n$listos / $total completos",
                 { tipoActual = i; render() }) { menuTipo(i) })
+            val notasTipo = notas.filter { it.tipo == t.nombre }
+            if (notasTipo.isNotEmpty()) {
+                val ultimas = notasTipo.takeLast(2).joinToString("\n") {
+                    "%s %02d: %s".format(it.prefijo, it.num, it.texto.replace("\n", " ").take(50))
+                }
+                col.addView(texto("📝 ${notasTipo.size} nota(s) — ver todas\n$ultimas", 12f).apply {
+                    setPadding(dp(12), dp(2), dp(12), dp(10))
+                    setOnClickListener { verNotas(t.nombre, notasTipo) }
+                })
+            }
         }
         col.addView(boton("＋ Agregar tipo") { agregarTipo() })
+        col.addView(boton("📊  Exportar todas las notas a Excel") {
+            val n = exportarNotas()
+            aviso(if (n == 0) "No hay notas en este evento"
+                  else "Listo: $n notas en $raiz/$evento/Notas $evento.csv")
+        })
         col.addView(espacio(16))
         col.addView(boton("← Cambiar evento") { enEvento = false; render() })
         col.addView(espacio(20))
@@ -484,6 +500,7 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Guardar") { _, _ ->
                 guardarNota(ruta, et.text.toString().trim())
                 actualizarResumen(t, p)
+                exportarNotas()
                 render()
             }
             .setNegativeButton("Cancelar", null)
@@ -494,7 +511,6 @@ class MainActivity : AppCompatActivity() {
     private fun dictar() {
         val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-CL")
             putExtra(RecognizerIntent.EXTRA_PROMPT, "Dicta la nota")
         }
         try { dictado.launch(i) }
@@ -753,6 +769,53 @@ class MainActivity : AppCompatActivity() {
             sb.append("${r.num};${fmtFecha.format(f)};${fmtHora.format(f)};${r.valor.replace('.', ',')};\"$nota\";${r.foto}\n")
         }
         escribirTexto(carpetaTerreno, "Registros.csv", sb.toString().trimEnd())
+    }
+
+    // ---------- Resumen y exportación de notas ----------
+
+    data class NotaInfo(val tipo: String, val prefijo: String, val pared: String, val num: Int, val texto: String)
+
+    /** Todas las notas del evento, en el orden de tipos y paredes configurado. */
+    private fun todasLasNotas(): List<NotaInfo> {
+        val conNota = carpetasConNota()
+        val res = mutableListOf<NotaInfo>()
+        for (t in tipos) for (p in t.paredes) for (n in 1..p.cantidad) {
+            val ruta = carpeta(t, p, n)
+            if (ruta in conNota) {
+                val txt = leerNota(ruta)
+                if (txt.isNotBlank()) res.add(NotaInfo(t.nombre, t.prefijo, p.nombre, n, txt))
+            }
+        }
+        return res
+    }
+
+    private fun verNotas(titulo: String, lista: List<NotaInfo>) {
+        val col = columna()
+        var paredPrevia = ""
+        for (nI in lista) {
+            if (nI.pared != paredPrevia) {
+                col.addView(texto(nI.pared, 14f, true)); paredPrevia = nI.pared
+            }
+            col.addView(texto("%s %02d: %s".format(nI.prefijo, nI.num, nI.texto), 13f)
+                .apply { setPadding(dp(8), dp(2), 0, dp(6)) })
+        }
+        AlertDialog.Builder(this).setTitle("Notas — $titulo")
+            .setView(scroll(col)).setPositiveButton("Cerrar", null).show()
+    }
+
+    /** "Notas <evento>.csv" en la carpeta del evento (se abre en Excel). Devuelve nº de notas. */
+    private fun exportarNotas(): Int {
+        val lista = todasLasNotas()
+        val nombre = "Notas $evento.csv"
+        if (lista.isEmpty()) { escribirTexto("$raiz/$evento/", nombre, ""); return 0 }
+        val sb = StringBuilder("﻿Tipo;Pared;Singularidad;Nota\n")
+        for (nI in lista) {
+            val nota = nI.texto.replace("\"", "\"\"").replace("\n", " ")
+            val sing = "%s %02d".format(nI.prefijo, nI.num)
+            sb.append("${nI.tipo};${nI.pared};$sing;\"$nota\"\n")
+        }
+        escribirTexto("$raiz/$evento/", nombre, sb.toString().trimEnd())
+        return lista.size
     }
 
     // ---------- Cámara / MediaStore ----------
