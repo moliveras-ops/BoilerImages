@@ -167,8 +167,8 @@ class CamaraActivity : AppCompatActivity() {
         getDrawable(res)?.mutate()?.apply { setTint(color); setBounds(0, 0, dp(tam), dp(tam)) }
 
     private fun chip(t: String, f: () -> Unit) = TextView(this).apply {
-        text = t; textSize = 16f; typeface = medio; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
-        background = fondo(gris, 26); setPadding(dp(16), 0, dp(16), 0); isClickable = true
+        text = t; textSize = 17f; typeface = medio; gravity = Gravity.CENTER; setTextColor(Color.WHITE); maxLines = 1
+        background = fondo(gris, 26); setPadding(dp(12), 0, dp(12), 0); isClickable = true
         setOnClickListener { f() }
     }
 
@@ -213,15 +213,17 @@ class CamaraActivity : AppCompatActivity() {
         arriba.addView(fila1)
 
         val fila2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(8), 0, 0) }
-        btnAnterior = chip("") { saltar(-1) }
-        btnSiguiente = chip("") { saltar(1) }
-        fila2.addView(btnAnterior, LinearLayout.LayoutParams(0, dp(56), 1f).apply { marginEnd = dp(6) })
         btnGeneral = chip("General") { cambiarModo("general") }
         btnDetalle = chip("Detalle") { cambiarModo("detalle") }
-        fila2.addView(btnGeneral, LinearLayout.LayoutParams(0, dp(56), 1.1f).apply { marginEnd = dp(4) })
-        fila2.addView(btnDetalle, LinearLayout.LayoutParams(0, dp(56), 1.1f).apply { marginEnd = dp(6) })
-        fila2.addView(btnSiguiente, LinearLayout.LayoutParams(0, dp(56), 1f))
+        fila2.addView(btnGeneral, LinearLayout.LayoutParams(0, dp(56), 1f).apply { marginEnd = dp(6) })
+        fila2.addView(btnDetalle, LinearLayout.LayoutParams(0, dp(56), 1f))
         arriba.addView(fila2)
+        val fila3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(6), 0, 0) }
+        btnAnterior = chip("") { saltar(-1) }
+        btnSiguiente = chip("") { saltar(1) }
+        fila3.addView(btnAnterior, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginEnd = dp(6) })
+        fila3.addView(btnSiguiente, LinearLayout.LayoutParams(0, dp(52), 1f))
+        arriba.addView(fila3)
         raiz.addView(arriba, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
 
         // --- Abajo: opciones, lentes y disparador ---
@@ -299,8 +301,9 @@ class CamaraActivity : AppCompatActivity() {
         val g = nombres.count { it.contains("_general_") && !it.contains("_marcada") }
         val d = nombres.count { it.contains("_detalle_") && !it.contains("_marcada") }
         txtConteo.text = "Generales: $g · Detalles: $d" + if (fotosTomadas > 0) "   ·   $fotosTomadas en esta sesión" else ""
-        btnAnterior.text = if (indice > 0) "‹ ${codigos[indice - 1]}" else "—"
-        btnSiguiente.text = if (indice < rutas.size - 1) "${codigos[indice + 1]} ›" else "—"
+        btnAnterior.text = if (indice > 0) "‹  ${titulos[indice - 1]}" else "—"
+        btnSiguiente.text = if (indice < rutas.size - 1) "${titulos[indice + 1]}  ›" else "—"
+        btnAnterior.textSize = 14f; btnSiguiente.textSize = 14f
         btnAnterior.alpha = if (indice > 0) 1f else 0.35f
         btnSiguiente.alpha = if (indice < rutas.size - 1) 1f else 0.35f
         estiloChip(btnGeneral, modo == "general")

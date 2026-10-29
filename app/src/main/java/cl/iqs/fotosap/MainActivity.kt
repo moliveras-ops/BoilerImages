@@ -665,7 +665,7 @@ class MainActivity : AppCompatActivity() {
             galeriaFotos("%s %02d — %s".format(t.prefijo, n, p.nombre), carpeta(t, p, n))
         })
         col.addView(boton("📷  Foto general") { dlg.dismiss(); tomarFoto(ti, pi, n, "general") })
-        col.addView(boton("🔍  Detalles (ráfaga)") { dlg.dismiss(); tomarFoto(ti, pi, n, "detalle") })
+        col.addView(boton(if (camaraPropia()) "🔍  Detalles" else "🔍  Detalles (ráfaga)") { dlg.dismiss(); tomarFoto(ti, pi, n, "detalle") })
         col.addView(boton("📝  Nota (escribir o dictar)") { dlg.dismiss(); editarNota(ti, pi, n) })
         col.addView(boton("📍  Foto con puntos de espesor") { dlg.dismiss(); medicionSingularidad(ti, pi, n) })
         col.addView(boton("📐  Medir con realidad aumentada") { dlg.dismiss(); medirRASingularidad(ti, pi, n) })
