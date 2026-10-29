@@ -73,13 +73,21 @@ class MainActivity : AppCompatActivity() {
 
     private val dictado = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         val txt = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
-        val et = notaEditando
+        val et = dictadoDestino ?: notaEditando
         if (!txt.isNullOrBlank() && et != null) {
-            val actual = et.text.toString().trimEnd()
-            et.setText(if (actual.isEmpty()) txt else "$actual $txt")
+            if (dictadoNumero) {
+                val v = numeroDictado(txt)
+                if (v.isBlank()) aviso("No entendí un número: \"$txt\"") else et.setText(v)
+            } else {
+                val actual = et.text.toString().trimEnd()
+                et.setText(if (actual.isEmpty()) txt else "$actual $txt")
+            }
             et.setSelection(et.text.length)
         }
+        dictadoDestino = null; dictadoNumero = false
     }
+    private var dictadoDestino: EditText? = null
+    private var dictadoNumero = false
     private val prefs by lazy { getSharedPreferences("fotosap", Context.MODE_PRIVATE) }
     private var tipos = mutableListOf<Tipo>()
     private var enEvento = false
@@ -100,14 +108,6 @@ class MainActivity : AppCompatActivity() {
 
         if (modo == "medBase" || modo == "medidor") {
             alVolverCamaraMed(modo, ok, uri)
-            return@registerForActivityResult
-        }
-
-        if (modo == "terreno") {
-            enTerreno = true
-            render()
-            if (ok && uri != null) procesarRegistro(uri, n)
-            else uri?.let { runCatching { contentResolver.delete(it, null, null) } }
             return@registerForActivityResult
         }
 
@@ -263,7 +263,7 @@ class MainActivity : AppCompatActivity() {
         val col = columna()
         val activo = eventoActivo()
         val etiqueta = if (activo == null) "📏  Notas en terreno\n(elige un evento)"
-                       else "📏  Notas en terreno — $activo (${registros().size})"
+                       else "📏  Notas en terreno — $activo (${mediciones().count { it.optString("origen") == "terreno" }} mediciones)"
         col.addView(boton(etiqueta) { abrirTerreno() }.apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
         col.addView(espacio(16))
         col.addView(texto("Eventos en el teléfono  (✎ para eliminar)", 14f, true))
@@ -459,7 +459,7 @@ class MainActivity : AppCompatActivity() {
                 "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?", arrayOf("$raiz/$nombre/%"))
         } catch (e: Exception) { 0 }
         guardarEventos(eventosGuardados().filter { it != nombre })
-        prefs.edit().remove("terreno_$nombre").remove("tipos_$nombre").remove("caldera_$nombre").apply()
+        prefs.edit().remove("terreno_$nombre").remove("med_$nombre").remove("tipos_$nombre").remove("caldera_$nombre").apply()
         val quedan = resumenEventos()[nombre]?.first ?: 0
         if (quedan > 0)
             aviso("Se borraron $borradas fotos. Quedan $quedan que la app no puede borrar: elimínalas desde Mis archivos.")
@@ -578,13 +578,50 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun dictar() {
+    /** Dictado por voz. [destino] = campo que recibe el texto; [numero] = convertir a número (espesor). */
+    private fun dictar(destino: EditText? = null, numero: Boolean = false) {
+        dictadoDestino = destino; dictadoNumero = numero
         val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Dicta la nota")
+            putExtra(RecognizerIntent.EXTRA_PROMPT, if (numero) "Dicta el espesor (ej. 18 coma 29)" else "Dicta la nota")
         }
         try { dictado.launch(i) }
         catch (e: Exception) { aviso("El dictado por voz no está disponible en este teléfono") }
+    }
+
+    private val palabrasNum = mapOf(
+        "cero" to 0, "un" to 1, "uno" to 1, "una" to 1, "dos" to 2, "tres" to 3, "cuatro" to 4, "cinco" to 5,
+        "seis" to 6, "siete" to 7, "ocho" to 8, "nueve" to 9, "diez" to 10, "once" to 11, "doce" to 12,
+        "trece" to 13, "catorce" to 14, "quince" to 15, "dieciseis" to 16, "diecisiete" to 17,
+        "dieciocho" to 18, "diecinueve" to 19, "veinte" to 20, "veintiuno" to 21, "veintiun" to 21,
+        "veintidos" to 22, "veintitres" to 23, "veinticuatro" to 24, "veinticinco" to 25, "veintiseis" to 26,
+        "veintisiete" to 27, "veintiocho" to 28, "veintinueve" to 29, "treinta" to 30, "cuarenta" to 40,
+        "cincuenta" to 50, "sesenta" to 60, "setenta" to 70, "ochenta" to 80, "noventa" to 90)
+
+    /** "18,29", "18 coma 29" o "dieciocho coma veintinueve" → "18.29". "" si no hay número. */
+    private fun numeroDictado(t: String): String {
+        val s = java.text.Normalizer.normalize(t.lowercase(Locale.ROOT), java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}"), "")
+            .replace(Regex("\\s*(coma|punto)\\s*"), " , ").replace('.', ',')
+        if (Regex("\\d").containsMatchIn(s)) {
+            val d = s.replace(Regex("\\s*,\\s*"), ".").replace(Regex("(?<=\\d)\\s+(?=\\d)"), "")
+            return Regex("\\d+(\\.\\d+)?").find(d)?.value ?: ""
+        }
+        val partes = s.split(",")
+        fun entero(p: String): Int? {
+            val v = p.split(Regex("\\s+")).filter { it.isNotBlank() && it != "y" }.map { palabrasNum[it] ?: return null }
+            return if (v.isEmpty()) null else v.sum()
+        }
+        val e = entero(partes[0]) ?: return ""
+        if (partes.size < 2) return e.toString()
+        // Decimales: "cero cinco" → 05, "veintinueve" → 29
+        val sb = StringBuilder(); var acum = 0; var hay = false
+        for (w in partes[1].split(Regex("\\s+")).filter { it.isNotBlank() && it != "y" }) {
+            val v = palabrasNum[w] ?: break
+            if (v == 0 && !hay) sb.append('0') else { acum += v; hay = true }
+        }
+        if (hay) sb.append(acum)
+        return if (sb.isEmpty()) e.toString() else "$e.$sb"
     }
 
     /** Busca un archivo por nombre dentro de una carpeta. */
@@ -1053,57 +1090,38 @@ class MainActivity : AppCompatActivity() {
     private fun pantallaTerreno() {
         title = "Notas en terreno — $evento"
         val col = columna()
-        col.addView(boton("📷  Nuevo registro (foto del medidor)") { nuevoRegistro() }
-            .apply { setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE) })
-        col.addView(boton("📍  Foto con puntos de espesor") { medicionTerreno() }
-            .apply { setBackgroundColor(Color.parseColor("#00838F")); setTextColor(Color.WHITE) })
-        col.addView(texto("La app lee el valor de la foto; revísalo siempre antes de guardar.", 12f))
+        col.addView(boton("📍  Nueva medición de espesores") { medicionTerreno() }.apply {
+            setBackgroundColor(Color.parseColor("#1565C0")); setTextColor(Color.WHITE); minHeight = dp(72); textSize = 17f
+        })
+        col.addView(texto("1. Foto de la zona   2. Toca cada punto medido   3. Valor con foto del medidor, " +
+                          "escrito o dictado   4. Guardar: queda la foto con el espesor en cada punto.", 12f))
         col.addView(espacio(8))
 
-        val lista = registros().sortedByDescending { it.num }
-        if (lista.isEmpty()) col.addView(texto("Aún no hay registros.", 13f))
-        for (r in lista) {
-            val f = Date(r.fecha)
-            val valor = if (r.valor.isBlank()) "sin valor" else "${r.valor.replace('.', ',')} mm"
-            val nota = if (r.nota.isBlank()) "" else "\n📝 " + r.nota.take(80) + if (r.nota.length > 80) "…" else ""
-            col.addView(boton("#%02d · %s · %s %s%s".format(r.num, valor, fmtFecha.format(f), fmtHora.format(f), nota)) {
-                editarRegistro(r, null, "")
-            }.apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL })
+        val meds = mediciones().filter { it.optString("origen") == "terreno" }.sortedByDescending { it.optLong("fecha") }
+        col.addView(texto("Mediciones (${meds.size})  — toca para ver, ✎ para editar o eliminar", 14f, true))
+        if (meds.isEmpty()) col.addView(texto("Aún no hay mediciones.", 13f))
+        meds.forEach { col.addView(filaMedicion(it)) }
+
+        // Lecturas sin foto de zona (creadas con la versión anterior)
+        val enMed = meds.flatMap { m -> puntosDe(m).map { it.num } }.toSet()
+        val sueltas = registros().filter { it.num !in enMed }.sortedByDescending { it.num }
+        if (sueltas.isNotEmpty()) {
+            col.addView(espacio(12))
+            col.addView(texto("Lecturas sueltas (versión anterior)", 14f, true))
+            for (r in sueltas) {
+                val f = Date(r.fecha)
+                val valor = if (r.valor.isBlank()) "sin valor" else "${r.valor.replace('.', ',')} mm"
+                val nota = if (r.nota.isBlank()) "" else "\n📝 " + r.nota.take(80) + if (r.nota.length > 80) "…" else ""
+                col.addView(boton("#%02d · %s · %s %s%s".format(r.num, valor, fmtFecha.format(f), fmtHora.format(f), nota)) {
+                    editarRegistro(r, null, "")
+                }.apply { gravity = Gravity.START or Gravity.CENTER_VERTICAL })
+            }
         }
         col.addView(espacio(16))
         col.addView(boton("← Volver a eventos") { enTerreno = false; enEvento = false; render() })
         col.addView(espacio(16))
-        col.addView(texto("Se guardan en: $carpetaTerreno\nIncluye Registros.csv para abrir en Excel.", 12f))
+        col.addView(texto("Se guardan en: $carpetaTerreno\nMedicion_NN.jpg (foto con espesores) y Registros.csv para Excel.", 12f))
         setContentView(scroll(col))
-    }
-
-    private fun nuevoRegistro() {
-        val num = (registros().maxOfOrNull { it.num } ?: 0) + 1
-        val nombre = "Registro_%02d.jpg".format(num)
-        val uri = contentResolver.insert(coleccion, ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
-            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, carpetaTerreno)
-        }) ?: run { aviso("No se pudo crear el archivo"); return }
-        prefs.edit()
-            .putString("pendUri", uri.toString())
-            .putString("pendModo", "terreno")
-            .putInt("pendTipo", -1).putInt("pendPared", -1)
-            .putInt("pendNum", num)
-            .apply()
-        try { camara.launch(uri) }
-        catch (e: Exception) { contentResolver.delete(uri, null, null); aviso("No se encontró app de cámara") }
-    }
-
-    /** Foto lista: leer el número con reconocimiento de texto (sin internet) y abrir el formulario. */
-    private fun procesarRegistro(uri: Uri, num: Int) {
-        val r = Registro(num, System.currentTimeMillis(), "", "", "Registro_%02d.jpg".format(num))
-        val espera = AlertDialog.Builder(this).setMessage("Leyendo el valor de la foto…").setCancelable(false).show()
-        leerMedidor(uri) { valor, texto ->
-            espera.dismiss()
-            r.valor = valor
-            editarRegistro(r, uri, texto)
-        }
     }
 
     /** Formulario de un registro. [uriNueva] != null cuando es un registro recién fotografiado. */
@@ -1240,11 +1258,12 @@ class MainActivity : AppCompatActivity() {
         return lista.size
     }
 
-    // ---------- Foto con puntos de espesor ----------
-    // Flujo: foto de la zona → tocar el punto medido → foto del medidor (se lee el valor) →
-    // el valor queda anotado en la foto. Se repite por cada punto; al guardar se crea la foto
-    // anotada. La sesión se guarda en prefs ("pendMed", no va al respaldo) para no perderla
-    // si Android cierra la app mientras la cámara está abierta.
+    // ---------- Medición: foto con puntos de espesor ----------
+    // Un solo flujo: foto de la zona → tocar cada punto medido → valor por foto del medidor
+    // (lectura automática) o escrito / dictado → la foto muestra el espesor en cada punto →
+    // Guardar crea la foto anotada. La sesión en curso vive en prefs ("pendMed", no va al
+    // respaldo) para no perderse si Android cierra la app con la cámara abierta. Las mediciones
+    // guardadas quedan en "med_<evento>" para verlas, editarlas o eliminarlas.
 
     data class Punto(var x: Float, var y: Float, var valor: String, var nota: String, val foto: String, val num: Int)
 
@@ -1278,6 +1297,26 @@ class MainActivity : AppCompatActivity() {
         s.put("puntos", arr)
     }
 
+    private fun textos(a: JSONArray?): MutableList<String> {
+        val l = mutableListOf<String>()
+        if (a != null) for (i in 0 until a.length()) l.add(a.optString(i))
+        return l
+    }
+
+    private fun mediciones(): MutableList<JSONObject> {
+        val l = mutableListOf<JSONObject>()
+        runCatching {
+            val arr = JSONArray(prefs.getString("med_$evento", "[]"))
+            for (i in 0 until arr.length()) l.add(arr.getJSONObject(i))
+        }
+        return l
+    }
+
+    private fun guardarMediciones(l: List<JSONObject>) {
+        val arr = JSONArray(); l.forEach { arr.put(it) }
+        prefs.edit().putString("med_$evento", arr.toString()).apply()
+    }
+
     /** Primer número libre para un nombre como "Medicion_%02d.jpg". */
     private fun libre(ruta: String, formato: String, desde: Int = 1): Int {
         var k = desde
@@ -1293,6 +1332,10 @@ class MainActivity : AppCompatActivity() {
         })
     }.getOrNull()
 
+    private fun borrarUri(u: String) {
+        if (u.isNotBlank()) runCatching { contentResolver.delete(Uri.parse(u), null, null) }
+    }
+
     private fun lanzarCamara(uri: Uri, modo: String) {
         prefs.edit().putString("pendUri", uri.toString()).putString("pendModo", modo)
             .putInt("pendTipo", -1).putInt("pendPared", -1).putInt("pendNum", -1).apply()
@@ -1305,7 +1348,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun medicionTerreno() {
-        val k = libre(carpetaTerreno, "Medicion_%02d.jpg")
+        val usados = mediciones().map { it.optString("base") }.toSet()
+        var k = libre(carpetaTerreno, "Medicion_%02d.jpg")
+        while ("Medicion_%02d".format(k) in usados) k++
         iniciarMedicion("terreno", carpetaTerreno, carpetaTerreno + "Originales/",
             "Medicion_%02d".format(k), "$evento — Medición %02d".format(k))
     }
@@ -1327,7 +1372,7 @@ class MainActivity : AppCompatActivity() {
             .put("fecha", System.currentTimeMillis()).put("ti", ti).put("pi", pi).put("n", n)
             .put("puntos", JSONArray())
         guardarSesionMed(s)
-        aviso("Toma una foto de la zona medida")
+        aviso("1. Toma una foto de la zona medida")
         lanzarCamara(uri, "medBase")
     }
 
@@ -1339,7 +1384,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         render()
-        if (modo == "medBase") { aviso("Toca en la foto el punto donde mediste"); return }
+        if (modo == "medBase") { aviso("2. Toca en la foto el punto donde mediste"); return }
         val espera = AlertDialog.Builder(this).setMessage("Leyendo el valor del medidor…").setCancelable(false).show()
         leerMedidor(uri) { valor, texto -> espera.dismiss(); dialogoPunto(uri, valor, texto, -1) }
     }
@@ -1352,60 +1397,78 @@ class MainActivity : AppCompatActivity() {
         render()
     }
 
-    /** Abre la cámara para fotografiar el medidor del punto (x, y). */
-    private fun fotoMedidor(x: Float, y: Float) {
+    /** Toque en un lugar libre de la foto: elegir cómo registrar el valor del nuevo punto. */
+    private fun nuevoPunto(x: Float, y: Float) {
+        val s = sesionMed() ?: return
+        AlertDialog.Builder(this).setTitle("Punto P${puntosDe(s).size + 1} — ¿cómo registras el valor?")
+            .setItems(arrayOf("📷  Foto del medidor (lee el valor)", "⌨️  Escribir o 🎤 dictar el valor")) { _, w ->
+                prepararPunto(x, y)
+                if (w == 0) fotoMedidor() else dialogoPunto(null, "", "", -1)
+            }
+            .setNegativeButton("Cancelar", null).show()
+    }
+
+    /** Guarda en la sesión la posición y el número del punto que se está agregando. */
+    private fun prepararPunto(x: Float, y: Float) {
         val s = sesionMed() ?: return
         val puntos = puntosDe(s)
-        val terreno = s.getString("origen") == "terreno"
-        val carpetaFoto: String
-        val num: Int
-        val nombre: String
-        if (terreno) {
-            carpetaFoto = s.getString("ruta")
-            val desde = maxOf(registros().maxOfOrNull { it.num } ?: 0, puntos.maxOfOrNull { it.num } ?: 0) + 1
-            num = libre(carpetaFoto, "Registro_%02d.jpg", desde)
-            nombre = "Registro_%02d.jpg".format(num)
-        } else {
-            carpetaFoto = s.getString("extra")
-            val base = s.getString("base")
-            num = libre(carpetaFoto, "${base}_medidor_%d.jpg", (puntos.maxOfOrNull { it.num } ?: 0) + 1)
-            nombre = "${base}_medidor_$num.jpg"
-        }
-        val uri = crearImagen(carpetaFoto, nombre) ?: run { aviso("No se pudo crear el archivo"); return }
+        val num = if (s.getString("origen") == "terreno") {
+            val desde = maxOf(registros().maxOfOrNull { it.num } ?: 0,
+                              puntos.maxOfOrNull { it.num } ?: 0,
+                              textos(s.optJSONArray("prevNums")).maxOfOrNull { it.toIntOrNull() ?: 0 } ?: 0) + 1
+            libre(s.getString("ruta"), "Registro_%02d.jpg", desde)
+        } else libre(s.getString("extra"), "${s.getString("base")}_medidor_%d.jpg", (puntos.maxOfOrNull { it.num } ?: 0) + 1)
         s.put("px", x.toDouble()).put("py", y.toDouble()).put("pnum", num)
         guardarSesionMed(s)
+    }
+
+    /** Abre la cámara para fotografiar el medidor del punto preparado. */
+    private fun fotoMedidor() {
+        val s = sesionMed() ?: return
+        val num = s.optInt("pnum")
+        val (carpetaFoto, nombre) = if (s.getString("origen") == "terreno")
+            s.getString("ruta") to "Registro_%02d.jpg".format(num)
+            else s.getString("extra") to "${s.getString("base")}_medidor_$num.jpg"
+        buscarArchivo(carpetaFoto, nombre)?.let { runCatching { contentResolver.delete(it, null, null) } }
+        val uri = crearImagen(carpetaFoto, nombre) ?: run { aviso("No se pudo crear el archivo"); return }
         lanzarCamara(uri, "medidor")
     }
 
-    /** Valor de un punto: nuevo (indice = -1) o corrección de uno existente. */
-    private fun dialogoPunto(uriMedidor: Uri, valorLeido: String, textoLeido: String, indice: Int) {
+    /** Valor de un punto: nuevo (indice = -1) o corrección de uno existente. Foto del medidor opcional. */
+    private fun dialogoPunto(uriMedidor: Uri?, valorLeido: String, textoLeido: String, indice: Int) {
         val s = sesionMed() ?: return
         val existente = puntosDe(s).getOrNull(indice)
         val etiqueta = "P${if (existente != null) indice + 1 else puntosDe(s).size + 1}"
         val col = columna()
-        runCatching { contentResolver.loadThumbnail(uriMedidor, Size(800, 800), null) }.getOrNull()?.let { bmp ->
-            col.addView(ImageView(this).apply {
-                setImageBitmap(bmp); adjustViewBounds = true
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(200))
-                scaleType = ImageView.ScaleType.FIT_CENTER
-            })
+        uriMedidor?.let { u ->
+            runCatching { contentResolver.loadThumbnail(u, Size(800, 800), null) }.getOrNull()?.let { bmp ->
+                col.addView(ImageView(this).apply {
+                    setImageBitmap(bmp); adjustViewBounds = true
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(180))
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                })
+            }
         }
-        if (existente == null) col.addView(texto(
-            if (valorLeido.isBlank()) "No se pudo leer el valor. Escríbelo." else "Valor leído: revísalo antes de agregar.", 12f))
+        if (existente == null) col.addView(texto(when {
+            uriMedidor == null -> "Escribe el espesor o tócalo en 🎤 para dictarlo (ej. \"dieciocho coma veintinueve\")."
+            valorLeido.isBlank() -> "No se pudo leer el valor. Escríbelo o díctalo."
+            else -> "Valor leído de la foto: revísalo antes de agregar."
+        }, 12f))
         col.addView(texto("Espesor (mm)", 13f, true))
         val etValor = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            textSize = 22f
             setText(existente?.valor ?: valorLeido); setSelection(text.length)
         }
         col.addView(etValor)
+        col.addView(boton("🎤  Dictar espesor") { dictar(etValor, true) })
         col.addView(texto("Nota (opcional)", 13f, true))
         val etNota = EditText(this).apply {
             setText(existente?.nota ?: "")
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         }
         col.addView(etNota)
-        notaEditando = etNota
-        col.addView(boton("🎤  Dictar nota") { dictar() })
+        col.addView(boton("🎤  Dictar nota") { dictar(etNota, false) })
 
         val dlg = AlertDialog.Builder(this)
             .setTitle("Punto $etiqueta")
@@ -1418,16 +1481,17 @@ class MainActivity : AppCompatActivity() {
                 val nt = etNota.text.toString().trim()
                 if (existente != null && indice in l.indices) { l[indice].valor = v; l[indice].nota = nt }
                 else l.add(Punto(s2.optDouble("px").toFloat(), s2.optDouble("py").toFloat(), v, nt,
-                                 uriMedidor.toString(), s2.optInt("pnum")))
+                                 uriMedidor?.toString() ?: "", s2.optInt("pnum")))
                 ponerPuntos(s2, l); guardarSesionMed(s2); render()
+                if (v.isBlank()) aviso("Punto agregado sin valor: tócalo para completarlo")
             }
             .setNegativeButton(if (existente == null) "Descartar" else "Cancelar") { _, _ ->
-                if (existente == null) runCatching { contentResolver.delete(uriMedidor, null, null) }
+                if (existente == null) uriMedidor?.let { runCatching { contentResolver.delete(it, null, null) } }
             }
             .setOnDismissListener { notaEditando = null }
-        if (existente == null) dlg.setNeutralButton("Repetir foto") { _, _ ->
-            runCatching { contentResolver.delete(uriMedidor, null, null) }
-            fotoMedidor(s.optDouble("px").toFloat(), s.optDouble("py").toFloat())
+        if (existente == null) dlg.setNeutralButton(if (uriMedidor != null) "Repetir foto" else "📷 Foto") { _, _ ->
+            uriMedidor?.let { runCatching { contentResolver.delete(it, null, null) } }
+            fotoMedidor()
         }
         dlg.show()
     }
@@ -1435,14 +1499,18 @@ class MainActivity : AppCompatActivity() {
     private fun menuPunto(i: Int) {
         val s = sesionMed() ?: return
         val p = puntosDe(s).getOrNull(i) ?: return
-        AlertDialog.Builder(this).setTitle("Punto P${i + 1}")
+        AlertDialog.Builder(this).setTitle("Punto P${i + 1}: ${textoValor(p.valor)}")
             .setItems(arrayOf("Corregir valor o nota", "Eliminar punto")) { _, w ->
                 when (w) {
-                    0 -> dialogoPunto(Uri.parse(p.foto), p.valor, "", i)
-                    1 -> confirmar("¿Eliminar el punto P${i + 1} y la foto de su medidor?") {
-                        runCatching { contentResolver.delete(Uri.parse(p.foto), null, null) }
+                    0 -> dialogoPunto(p.foto.takeIf { it.isNotBlank() }?.let(Uri::parse), p.valor, "", i)
+                    1 -> confirmar("¿Eliminar el punto P${i + 1}?") {
                         val s2 = sesionMed() ?: return@confirmar
-                        val l = puntosDe(s2); if (i in l.indices) l.removeAt(i)
+                        val l = puntosDe(s2)
+                        if (i in l.indices) {
+                            // La foto del medidor se borra al guardar (por si se cancela la edición)
+                            if (l[i].foto.isNotBlank()) s2.put("borrar", (s2.optJSONArray("borrar") ?: JSONArray()).put(l[i].foto))
+                            l.removeAt(i)
+                        }
                         ponerPuntos(s2, l); guardarSesionMed(s2); render()
                     }
                 }
@@ -1450,11 +1518,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun descartarMedicion() {
-        confirmar("¿Salir sin guardar? Se borran la foto y las fotos del medidor de esta medición.") {
-            val s = sesionMed()
+        val s = sesionMed()
+        val editar = s?.optBoolean("editar") == true
+        confirmar(if (editar) "¿Salir sin guardar los cambios?"
+                  else "¿Salir sin guardar? Se borran la foto y las fotos del medidor de esta medición.") {
             if (s != null) {
-                puntosDe(s).forEach { runCatching { contentResolver.delete(Uri.parse(it.foto), null, null) } }
-                runCatching { contentResolver.delete(Uri.parse(s.getString("foto")), null, null) }
+                val orig = textos(s.optJSONArray("orig")).toSet()
+                (puntosDe(s).map { it.foto } + textos(s.optJSONArray("borrar")))
+                    .filter { it !in orig }.forEach { borrarUri(it) }
+                if (!editar) borrarUri(s.optString("foto"))
             }
             guardarSesionMed(null)
             volverDeMedicion(s)
@@ -1483,8 +1555,8 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), dp(8), dp(8), dp(8))
         }
-        col.addView(texto("Toca el punto donde mediste y fotografía el medidor. " +
-                          "Toca un punto marcado para corregirlo o eliminarlo.", 12f))
+        col.addView(texto(if (puntos.isEmpty()) "Toca en la foto el punto donde mediste."
+                          else "Toca otro punto para agregarlo, o un punto marcado para corregirlo.", 13f, true))
         if (bmp != null) {
             col.addView(VistaPuntos(bmp, puntos).apply {
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
@@ -1498,7 +1570,7 @@ class MainActivity : AppCompatActivity() {
             else puntos.mapIndexed { i, p -> "P${i + 1}: ${textoValor(p.valor)}" }.joinToString(" · ")
         col.addView(texto(resumen, 13f, true))
         val filaBotones = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        filaBotones.addView(boton("✕ Descartar") { descartarMedicion() }.apply {
+        filaBotones.addView(boton("✕ Salir") { descartarMedicion() }.apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
         filaBotones.addView(boton("💾 Guardar (${puntos.size})") { guardarMedicion() }.apply {
@@ -1532,7 +1604,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 performClick()
                 if (cerca >= 0) menuPunto(cerca)
-                else fotoMedidor((e.x - dst.left) / dst.width(), (e.y - dst.top) / dst.height())
+                else nuevoPunto((e.x - dst.left) / dst.width(), (e.y - dst.top) / dst.height())
             }
             return true
         }
@@ -1546,8 +1618,8 @@ class MainActivity : AppCompatActivity() {
         val amarillo = Color.parseColor("#FFEB3B")
         val linea = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1.8f * u; color = amarillo }
         val sombra = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 4f * u; color = Color.BLACK }
-        val letra = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 14f * u; typeface = Typeface.DEFAULT_BOLD }
-        val fondo = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(210, 0, 0, 0) }
+        val letra = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 15f * u; typeface = Typeface.DEFAULT_BOLD }
+        val fondo = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(215, 0, 0, 0) }
         val fm = letra.fontMetrics
         puntos.forEachIndexed { i, p ->
             val cx = r.left + p.x * r.width()
@@ -1584,7 +1656,7 @@ class MainActivity : AppCompatActivity() {
         val s = sesionMed() ?: return
         val puntos = puntosDe(s)
         if (puntos.isEmpty()) { aviso("Marca al menos un punto"); return }
-        val espera = AlertDialog.Builder(this).setMessage("Guardando foto anotada…").setCancelable(false).show()
+        val espera = AlertDialog.Builder(this).setMessage("Guardando foto con espesores…").setCancelable(false).show()
         Thread {
             val res = runCatching { crearFotoAnotada(s, puntos) }
             runOnUiThread {
@@ -1628,7 +1700,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         val nombre = "${s.getString("base")}.jpg"
-        val uri = crearImagen(s.getString("ruta"), nombre) ?: error("sin archivo")
+        val ruta = s.getString("ruta")
+        buscarArchivo(ruta, nombre)?.let { runCatching { contentResolver.delete(it, null, null) } }
+        val uri = crearImagen(ruta, nombre) ?: error("sin archivo")
         contentResolver.openOutputStream(uri)?.use { out.compress(Bitmap.CompressFormat.JPEG, 92, it) }
             ?: error("sin archivo")
         out.recycle()
@@ -1638,14 +1712,18 @@ class MainActivity : AppCompatActivity() {
     private fun terminarMedicion(s: JSONObject, puntos: List<Punto>, nombre: String) {
         val base = s.getString("base")
         val f = Date(s.getLong("fecha"))
+        textos(s.optJSONArray("borrar")).forEach { borrarUri(it) }
         if (s.getString("origen") == "terreno") {
-            // Cada punto queda también como registro (con la foto de su medidor) en Registros.csv
+            // Cada punto queda también como registro en Registros.csv
             val nuevos = puntos.mapIndexed { i, p ->
                 val nota = "$base P${i + 1}" + if (p.nota.isBlank()) "" else " — ${p.nota}"
-                Registro(p.num, s.getLong("fecha"), p.valor, nota, "Registro_%02d.jpg".format(p.num))
+                val foto = if (p.foto.isBlank()) "" else "Registro_%02d.jpg".format(p.num)
+                Registro(p.num, s.getLong("fecha"), p.valor, nota, foto)
             }
             val nums = nuevos.map { it.num }.toSet()
-            guardarRegistros(registros().filter { it.num !in nums } + nuevos)
+            val previos = textos(s.optJSONArray("prevNums")).mapNotNull { it.toIntOrNull() }.toSet()
+            (previos - nums).forEach { escribirTexto(carpetaTerreno, "Registro_%02d.txt".format(it), "") }
+            guardarRegistros(registros().filter { it.num !in nums && it.num !in previos } + nuevos)
             nuevos.forEach { escribirTexto(carpetaTerreno, "Registro_%02d.txt".format(it.num), textoRegistro(it)) }
         } else {
             val sb = StringBuilder("${s.optString("titulo")}\nFecha: ${fmtFecha.format(f)} ${fmtHora.format(f)}\n" +
@@ -1657,9 +1735,109 @@ class MainActivity : AppCompatActivity() {
             }
             escribirTexto(s.getString("extra"), "$base.txt", sb.toString().trim())
         }
+        val m = JSONObject(s.toString()).put("anotada", nombre)
+        listOf("editar", "orig", "borrar", "prevNums", "px", "py", "pnum").forEach { m.remove(it) }
+        guardarMediciones(mediciones().filter { it.optString("base") != base || it.optString("ruta") != m.optString("ruta") } + m)
         guardarSesionMed(null)
-        aviso("Guardada: $nombre (${puntos.size} puntos)")
         volverDeMedicion(s)
+        verMedicion(m)
+    }
+
+    // ---------- Mediciones guardadas ----------
+
+    private fun uriAnotada(m: JSONObject) = buscarArchivo(m.optString("ruta"), m.optString("anotada"))
+
+    private fun nombreMedicion(m: JSONObject) = m.optString("base").replace('_', ' ').replace("Medicion", "Medición")
+
+    /** Muestra la foto con los espesores (con opción de compartir). */
+    private fun verMedicion(m: JSONObject) {
+        val uri = uriAnotada(m) ?: run { aviso("No se encontró la foto ${m.optString("anotada")}"); return }
+        val bmp = runCatching { cargarBitmap(uri, 2000) }.getOrNull() ?: run { aviso("No se pudo abrir la foto"); return }
+        val iv = ImageView(this).apply {
+            setImageBitmap(bmp); adjustViewBounds = true
+            scaleType = ImageView.ScaleType.FIT_CENTER
+        }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle(nombreMedicion(m))
+            .setView(scroll(iv))
+            .setPositiveButton("Cerrar", null)
+            .setNeutralButton("Compartir") { _, _ -> compartir(uri) }
+        if (m.optString("origen") == "terreno") dlg.setNegativeButton("Editar puntos") { _, _ -> editarMedicion(m) }
+        dlg.show()
+    }
+
+    private fun compartir(uri: Uri) {
+        val i = Intent(Intent.ACTION_SEND).setType("image/jpeg")
+            .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        runCatching { startActivity(Intent.createChooser(i, "Compartir foto")) }
+            .onFailure { aviso("No hay app para compartir") }
+    }
+
+    private fun menuMedicion(m: JSONObject) {
+        AlertDialog.Builder(this).setTitle(nombreMedicion(m))
+            .setItems(arrayOf("Ver foto con espesores", "Editar puntos", "Eliminar medición")) { _, w ->
+                when (w) {
+                    0 -> verMedicion(m)
+                    1 -> editarMedicion(m)
+                    2 -> confirmar("¿Eliminar ${nombreMedicion(m)}, su foto y sus lecturas?") { eliminarMedicion(m) }
+                }
+            }.show()
+    }
+
+    private fun editarMedicion(m: JSONObject) {
+        val s = JSONObject(m.toString())
+        val puntos = puntosDe(s)
+        val orig = JSONArray(); puntos.forEach { if (it.foto.isNotBlank()) orig.put(it.foto) }
+        val nums = JSONArray(); puntos.forEach { nums.put(it.num.toString()) }
+        s.put("editar", true).put("orig", orig).put("prevNums", nums).put("borrar", JSONArray())
+        guardarSesionMed(s)
+        render()
+    }
+
+    private fun eliminarMedicion(m: JSONObject) {
+        uriAnotada(m)?.let { runCatching { contentResolver.delete(it, null, null) } }
+        borrarUri(m.optString("foto"))
+        val puntos = puntosDe(m)
+        puntos.forEach { borrarUri(it.foto) }
+        if (m.optString("origen") == "terreno") {
+            val nums = puntos.map { it.num }.toSet()
+            nums.forEach { escribirTexto(carpetaTerreno, "Registro_%02d.txt".format(it), "") }
+            guardarRegistros(registros().filter { it.num !in nums })
+        } else escribirTexto(m.optString("extra"), "${m.optString("base")}.txt", "")
+        guardarMediciones(mediciones().filter { it.optString("base") != m.optString("base") || it.optString("ruta") != m.optString("ruta") })
+        aviso("Medición eliminada")
+        render()
+    }
+
+    /** Fila de la lista: miniatura de la foto anotada + resumen de valores. */
+    private fun filaMedicion(m: JSONObject): View {
+        val fila = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.parseColor("#E3E7EB"))
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { setMargins(0, dp(4), 0, dp(4)) }
+            setOnClickListener { verMedicion(m) }
+            setOnLongClickListener { menuMedicion(m); true }
+        }
+        uriAnotada(m)?.let { u -> runCatching { contentResolver.loadThumbnail(u, Size(300, 300), null) }.getOrNull() }
+            ?.let { bmp ->
+                fila.addView(ImageView(this).apply {
+                    setImageBitmap(bmp); scaleType = ImageView.ScaleType.CENTER_CROP
+                    layoutParams = LinearLayout.LayoutParams(dp(84), dp(84)).apply { marginEnd = dp(10) }
+                })
+            }
+        val puntos = puntosDe(m)
+        val f = Date(m.optLong("fecha"))
+        val valores = puntos.mapIndexed { i, p -> "P${i + 1} ${textoValor(p.valor)}" }.joinToString(" · ")
+        fila.addView(texto("${nombreMedicion(m)} · ${puntos.size} punto(s)\n${fmtFecha.format(f)} ${fmtHora.format(f)}\n$valores", 13f)
+            .apply {
+                setTextColor(Color.parseColor("#14202B"))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+        fila.addView(boton("✎") { menuMedicion(m) }.apply { layoutParams = LinearLayout.LayoutParams(dp(56), dp(56)) })
+        return fila
     }
 
     // ---------- Lectura del medidor de espesores ----------
