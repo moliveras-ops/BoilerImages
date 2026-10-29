@@ -1348,7 +1348,10 @@ class MainActivity : AppCompatActivity() {
         prefs.getString("pendMed", null)?.let { runCatching { JSONObject(it) }.getOrNull() }
 
     private fun guardarSesionMed(s: JSONObject?) {
-        if (s == null) { prefs.edit().remove("pendMed").apply(); cacheMed = null; moviendo = -1 }
+        if (s == null) {
+            android.util.Log.i("BoilerImage", "fin de sesión de medición", Throwable())
+            prefs.edit().remove("pendMed").apply(); cacheMed = null; moviendo = -1
+        }
         else prefs.edit().putString("pendMed", s.toString()).apply()
     }
 
