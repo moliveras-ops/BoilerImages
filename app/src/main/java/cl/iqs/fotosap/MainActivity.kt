@@ -382,10 +382,8 @@ class MainActivity : AppCompatActivity() {
             enCalderas = true; plantaActual = null; render()
         })
         col.addView(boton("💾  Respaldo y restauración") { menuRespaldo() })
-        col.addView(boton(if (camaraPropia()) "📷  Cámara: BoilerImage\nLinterna, lentes, volumen y ráfaga · tocar para usar la del teléfono"
-                          else "📷  Cámara: la del teléfono\nTocar para usar la cámara BoilerImage") {
-            prefs.edit().putBoolean("camaraPropia", !camaraPropia()).apply()
-            aviso(if (camaraPropia()) "Se usará la cámara BoilerImage" else "Se usará la cámara del teléfono")
+        col.addView(selector("📷", "Cámara", listOf("BoilerImage", "Teléfono"), if (camaraPropia()) 0 else 1) { i ->
+            prefs.edit().putBoolean("camaraPropia", i == 0).apply()
             render()
         })
         col.addView(espacio(20))
@@ -3299,6 +3297,41 @@ class MainActivity : AppCompatActivity() {
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             .apply { setMargins(0, dp(5), 0, dp(5)) }
+    }
+
+    /** Selector segmentado: ícono + título a la izquierda y opciones a la derecha (una activa). */
+    private fun selector(emoji: String, titulo: String, opciones: List<String>, actual: Int, onSelect: (Int) -> Unit): View {
+        val fila = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(8), dp(8), dp(8))
+            background = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(C.superficie); setStroke(dp(1), C.borde) }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { setMargins(0, dp(5), 0, dp(5)) }
+        }
+        val (ic, _) = separarIcono(emoji)
+        fila.addView(TextView(this).apply {
+            text = titulo; textSize = 16f; typeface = medio; setTextColor(C.primario)
+            ic?.let { r -> setCompoundDrawablesRelative(icono(r, C.primario), null, null, null); compoundDrawablePadding = dp(12) }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        val grupo = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; setPadding(dp(3), dp(3), dp(3), dp(3))
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(C.primarioSuave) }
+        }
+        opciones.forEachIndexed { i, o ->
+            val activo = i == actual
+            grupo.addView(TextView(this).apply {
+                text = o; textSize = 15f; typeface = medio; gravity = Gravity.CENTER
+                setTextColor(if (activo) Color.WHITE else C.primario)
+                setPadding(dp(14), 0, dp(14), 0)
+                minHeight = dp(52); minimumHeight = dp(52)
+                background = if (activo) fondoRedondeado(C.primario, 10) else fondoRedondeado(Color.TRANSPARENT, 10)
+                isClickable = true
+                setOnClickListener { if (!activo) onSelect(i) }
+            })
+        }
+        fila.addView(grupo)
+        return fila
     }
 
     /** Botón redondo solo con ícono (editar, etc.). */
