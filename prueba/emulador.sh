@@ -46,25 +46,18 @@ escribir() { # reemplaza el texto del diálogo y guarda ("%s" = espacio)
   adb shell input keyevent $(for i in $(seq 1 24); do printf 'KEYCODE_DEL '; done)
   [ -n "$1" ] && adb shell input text "$1"; sleep 1; tap "=Guardar"; sleep 1
 }
-campos() { # rellena los EditText del diálogo en orden; "-" = dejar como está ("%s" = espacio)
-  dump
-  python3 - <<'PY' > $OUT/campos.txt
-import re
-x=open('prueba/salida/ui.xml',encoding='utf-8').read()
-for m in re.finditer(r'<node ([^>]*)>',x):
-    a=m.group(1)
-    if 'class="android.widget.EditText"' in a:
-        b=re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',a); x1,y1,x2,y2=map(int,b.groups()); print((x1+x2)//2,(y1+y2)//2)
-PY
-  k=0
-  while read -r xy; do
-    k=$((k+1)); v=$(eval echo "\${$k}")
-    [ "$v" = "-" ] || [ -z "$v" ] && continue
-    adb shell input tap $xy; sleep 0.5
+campos() { # rellena los EditText del diálogo en orden (Tab pasa al siguiente); "%s" = espacio
+  b=$(buscar "nombre base (ej"); [ -z "$b" ] && dump && b=$(python3 -c "
+import re;x=open('prueba/salida/ui.xml',encoding='utf-8').read()
+m=re.search(r'class=\"android.widget.EditText\"[^>]*bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]',x)
+print((int(m[1])+int(m[3]))//2,(int(m[2])+int(m[4]))//2) if m else None")
+  adb shell input tap $b; sleep 1
+  for v in "$@"; do
     adb shell input keyevent KEYCODE_MOVE_END
     adb shell input keyevent $(for i in $(seq 1 12); do printf 'KEYCODE_DEL '; done)
     adb shell input text "$v"; sleep 0.5
-  done < $OUT/campos.txt
+    adb shell input keyevent KEYCODE_TAB; sleep 0.5
+  done
 }
 teclado_fuera() { adb shell dumpsys input_method | grep -q "mInputShown=true" && adb shell input keyevent KEYCODE_BACK; sleep 1; }
 serie() { tap "generar carpetas numeradas"; campos "$1" "$2" "$3" "$4"; teclado_fuera; cap "serie_$1"; tap "=Generar"; sleep 2; }
