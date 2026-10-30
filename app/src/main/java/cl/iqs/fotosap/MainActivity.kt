@@ -3887,7 +3887,7 @@ class MainActivity : AppCompatActivity() {
         })
         progreso?.let { (hechos, total) -> textos.addView(barra(hechos, total)) }
         tarjeta.addView(textos)
-        tarjeta.addView(botonIcono(R.drawable.ic_editar) { onEditar() })
+        tarjeta.addView(botonIcono(R.drawable.ic_editar) { onEditar() }.apply { contentDescription = "Editar" })
         return tarjeta
     }
 
