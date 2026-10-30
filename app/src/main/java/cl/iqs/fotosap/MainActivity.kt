@@ -145,6 +145,10 @@ class MainActivity : AppCompatActivity() {
     private var insps = mutableListOf<Insp>()
     private var inspActual = -1                    // inspección por árbol abierta
     private val nodoRuta = mutableListOf<Int>()     // camino de índices dentro de la inspección
+    /** Última carpeta tocada en una grilla: se destaca con borde naranja. */
+    private var seleccion: String?
+        get() = prefs.getString("selCelda", null)
+        set(v) { prefs.edit().putString("selCelda", v).apply() }
 
     private val camara = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val uri = prefs.getString("pendUri", null)?.let(Uri::parse)
@@ -511,12 +515,12 @@ class MainActivity : AppCompatActivity() {
                 stateListAnimator = null; elevation = 0f
                 val est = estado(info)
                 setTextColor(if (est == 0) C.tinta else Color.WHITE)
-                background = when (est) {
-                    2 -> fondoRedondeado(C.ok, 12)
-                    1 -> fondoRedondeado(C.parcial, 12)
-                    else -> fondoRedondeado(C.superficie, 12, C.borde)
-                }
-                setOnClickListener { menuElemento(claveSing(ti, pi, n)) }
+                val clave = claveSing(ti, pi, n)
+                tag = clave
+                val pintar = { fondoCelda(est, null, clave == seleccion) }
+                setTag(R.id.pintarCelda, pintar)
+                background = pintar()
+                setOnClickListener { seleccionar(this, clave); menuElemento(clave) }
                 layoutParams = GridLayout.LayoutParams().apply {
                     width = 0; height = dp(84)
                     columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
@@ -1067,13 +1071,14 @@ class MainActivity : AppCompatActivity() {
                     stateListAnimator = null; elevation = 0f
                     val est = estado(inf)
                     setTextColor(if (est == 0) C.tinta else Color.WHITE)
-                    val borde = when (c) { "crit" -> C.peligro; "obs" -> C.acento; else -> null }
-                    background = when (est) {
-                        2 -> fondoRedondeado(C.ok, 12, borde, 3)
-                        1 -> fondoRedondeado(C.parcial, 12, borde, 3)
-                        else -> fondoRedondeado(C.superficie, 12, borde ?: C.borde, if (borde != null) 3 else 1)
-                    }
-                    setOnClickListener { menuElemento(claveNodo(ii, rh)) }
+                    // El naranjo queda reservado para la carpeta seleccionada; "Obs." se indica con texto
+                    val borde = if (c == "crit") C.peligro else null
+                    val clave = claveNodo(ii, rh)
+                    tag = clave
+                    val pintar = { fondoCelda(est, borde, clave == seleccion) }
+                    setTag(R.id.pintarCelda, pintar)
+                    background = pintar()
+                    setOnClickListener { seleccionar(this, clave); menuElemento(clave) }
                     setOnLongClickListener { menuNodo(ii, rh); true }
                     layoutParams = GridLayout.LayoutParams().apply {
                         width = 0; height = dp(if (c.isNotEmpty() || rr in conNota) 96 else 84)
@@ -3804,6 +3809,34 @@ class MainActivity : AppCompatActivity() {
     private val medio: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 
     /** Fondo redondeado con efecto al tocar. */
+    /** Fondo de una celda de grilla según estado; la seleccionada lleva anillo naranjo grueso. */
+    private fun fondoCelda(est: Int, borde: Int?, sel: Boolean): android.graphics.drawable.Drawable {
+        val relleno = when (est) { 2 -> C.ok; 1 -> C.parcial; else -> C.superficie }
+        if (!sel) return when {
+            borde != null -> fondoRedondeado(relleno, 12, borde, 3)
+            est == 0 -> fondoRedondeado(relleno, 12, C.borde)
+            else -> fondoRedondeado(relleno, 12)
+        }
+        val anillo = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(C.acento) }
+        val interior = GradientDrawable().apply {
+            cornerRadius = dp(10).toFloat(); setColor(relleno); setStroke(dp(2), Color.WHITE)
+        }
+        return android.graphics.drawable.LayerDrawable(arrayOf(anillo, interior)).apply {
+            setLayerInset(1, dp(4), dp(4), dp(4), dp(4))
+        }
+    }
+
+    /** Marca [b] como seleccionada y quita la marca a las demás celdas de la misma grilla. */
+    private fun seleccionar(b: View, clave: String) {
+        seleccion = clave
+        val g = b.parent as? ViewGroup ?: return
+        for (i in 0 until g.childCount) {
+            val v = g.getChildAt(i)
+            @Suppress("UNCHECKED_CAST")
+            (v.getTag(R.id.pintarCelda) as? () -> android.graphics.drawable.Drawable)?.let { v.background = it() }
+        }
+    }
+
     private fun fondoRedondeado(color: Int, radio: Int = 14, borde: Int? = null, ancho: Int = 1): android.graphics.drawable.Drawable {
         val forma = GradientDrawable().apply {
             cornerRadius = dp(radio).toFloat(); setColor(color); borde?.let { setStroke(dp(ancho), it) }
