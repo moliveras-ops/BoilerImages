@@ -651,7 +651,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun agregarTipo() {
-        dialogoTexto("Nombre del tipo (ej. Aires Secundarios)", "") { nombre ->
+        pedirNombre("Nombre del tipo (ej. Aires Secundarios)", "") { nombre ->
             dialogoTexto("Prefijo corto (ej. AS)", nombre.take(2).uppercase()) { pref ->
                 tipos.add(Tipo(limpiar(nombre), limpiar(pref), cuatro(10)))
                 guardar(); render()
@@ -664,7 +664,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this).setTitle(t.nombre)
             .setItems(arrayOf("Renombrar", "Cambiar prefijo", "Subir", "Bajar", "Eliminar")) { _, w ->
                 when (w) {
-                    0 -> dialogoTexto("Nuevo nombre", t.nombre) { t.nombre = limpiar(it); guardar(); render() }
+                    0 -> pedirNombre("Nuevo nombre", t.nombre) { t.nombre = limpiar(it); guardar(); render() }
                     1 -> dialogoTexto("Nuevo prefijo", t.prefijo) { t.prefijo = limpiar(it); guardar(); render() }
                     2 -> { tipos.mover(ti, -1); guardar(); render() }
                     3 -> { tipos.mover(ti, 1); guardar(); render() }
@@ -676,7 +676,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun agregarPared(ti: Int) {
-        dialogoTexto("Nombre de la pared", "Pared ") { nombre ->
+        pedirNombre("Nombre de la pared", "Pared ") { nombre ->
             dialogoTexto("Cantidad de singularidades", "10", true) { c ->
                 val n = c.toIntOrNull()
                 if (n != null && n in 1..300) {
@@ -697,7 +697,7 @@ class MainActivity : AppCompatActivity() {
                         if (n != null && n in 1..300) { p.cantidad = n; guardar(); render() }
                         else aviso("Cantidad entre 1 y 300")
                     }
-                    1 -> dialogoTexto("Nuevo nombre", p.nombre) { p.nombre = limpiar(it); guardar(); render() }
+                    1 -> pedirNombre("Nuevo nombre", p.nombre) { p.nombre = limpiar(it); guardar(); render() }
                     2 -> { lista.mover(pi, -1); guardar(); render() }
                     3 -> { lista.mover(pi, 1); guardar(); render() }
                     4 -> confirmar("¿Eliminar ${p.nombre}? Las fotos ya tomadas no se borran.") {
