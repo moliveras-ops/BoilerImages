@@ -153,6 +153,10 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().remove("pendUri").apply()
         android.util.Log.i("BoilerImage", "camara ok=$ok modo=$modo uri=$uri")
 
+        if (modo == "nombre") {
+            if (ok && uri != null) leerNombreDe(uri, true) else uri?.let { runCatching { contentResolver.delete(it, null, null) } }
+            return@registerForActivityResult
+        }
         if (modo == "medBase" || modo == "medidor") {
             alVolverCamaraMed(modo, ok, uri)
             return@registerForActivityResult
@@ -194,7 +198,11 @@ class MainActivity : AppCompatActivity() {
                 when {
                     prefs.contains("pendMed") -> descartarMedicion()
                     enTerreno -> { enTerreno = false; enEvento = false; render() }
-                    inspActual >= 0 -> { if (nodoRuta.isEmpty()) inspActual = -1 else nodoRuta.removeAt(nodoRuta.size - 1); render() }
+                    inspActual >= 0 -> {
+                        if (nodoRuta.isNotEmpty()) nodoRuta.removeAt(nodoRuta.size - 1)
+                        else { inspActual = -1; if (esElementos()) enEvento = false }
+                        render()
+                    }
                     paredActual >= 0 -> { paredActual = -1; render() }
                     tipoActual >= 0 -> { tipoActual = -1; render() }
                     plantilla != null -> cerrarPlantilla()
@@ -359,6 +367,7 @@ class MainActivity : AppCompatActivity() {
             enCalderas && plantaActual != null -> pantallaPlanta(plantaActual!!)
             enCalderas -> pantallaPlantas()
             !enEvento -> pantallaEventos()
+            esElementos() && insps.isNotEmpty() -> { if (inspActual < 0) inspActual = 0; pantallaNodo() }
             inspActual >= 0 -> pantallaNodo()
             tipoActual < 0 -> pantallaTipos()
             paredActual < 0 -> pantallaTipo(tipoActual)
@@ -388,7 +397,8 @@ class MainActivity : AppCompatActivity() {
             val detalle = if (r == null) "sin fotos"
                 else "${r.first} fotos · última: ${fecha.format(Date(r.second * 1000))}"
             val marca = if (nombre == evento) "● " else ""
-            val cald = prefs.getString("caldera_$nombre", null)?.let { "\n$it" } ?: ""
+            val cald = if (esElementos(nombre)) "\nInspección por elementos"
+                       else prefs.getString("caldera_$nombre", null)?.let { "\n$it" } ?: ""
             col.addView(fila("📅 $marca$nombre\n$detalle$cald", { abrirEvento(nombre) }) { menuEvento(nombre) })
         }
         col.addView(boton("＋ Nuevo evento", Estilo.ACENTO) { nuevoEvento() })
@@ -434,17 +444,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
         col.addView(boton("＋ Agregar tipo") { agregarTipo() })
+        // Inspecciones por árbol creadas en versiones de prueba dentro de un evento de singularidades
+        if (insps.isNotEmpty()) {
         col.addView(espacio(12))
-        col.addView(texto("Inspecciones por elementos (paneles, tubos, niveles…)", 14f, true))
-        if (insps.isEmpty()) col.addView(texto("Arma tu propio árbol, por ejemplo Panel › Tubo o Nivel › Pared › Tubo.", 13f))
+        col.addView(texto("Inspecciones por elementos", 14f, true))
         insps.forEachIndexed { ii, ins ->
             val hojas = elementosDe(ins.nodo)
             val listos = hojas.count { (r, _) -> estado(conteo[carpetaNodo(ii, r)]) == 2 }
-            val niv = if (ins.niveles.isEmpty()) "sin niveles" else ins.niveles.joinToString(" › ")
-            col.addView(fila("🌳 ${ins.nodo.nombre}\n$listos de ${hojas.size} elementos completos · $niv",
+            col.addView(fila("🌳 ${ins.nodo.nombre}\n$listos de ${hojas.size} elementos completos",
                 { inspActual = ii; nodoRuta.clear(); render() }, listos to hojas.size) { menuInsp(ii) })
         }
-        col.addView(boton("＋ Nueva inspección por elementos") { nuevaInspeccion() })
+        }
         col.addView(espacio(12))
         col.addView(boton("💾  Guardar como plantilla de caldera") { guardarComoPlantilla() })
         col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
@@ -580,11 +590,17 @@ class MainActivity : AppCompatActivity() {
         plantilla = null; enCalderas = false; plantaActual = null
         cargar()
         enEvento = true; tipoActual = -1; paredActual = -1; inspActual = -1; nodoRuta.clear()
+        if (esElementos()) {
+            if (insps.isEmpty()) { insps.add(Insp(Nodo(nombre, sugerirCodigo(nombre)), mutableListOf())); guardarInsp() }
+            inspActual = 0
+        }
         render()
     }
 
     private fun nuevoEvento() {
-        crearEvento { abrirEvento(it) }
+        menuGrande("Nuevo evento — ¿qué vas a inspeccionar?", listOf(
+            "🔥  Singularidades de caldera\nAires, quemadores, boquillas (con plantillas de planta y caldera)" to { crearEvento { abrirEvento(it) } },
+            "🌳  Inspección por elementos\nTú creas las carpetas: paneles, tubos, niveles…" to { crearEventoElementos() }))
     }
 
     private fun menuEvento(nombre: String) {
@@ -626,7 +642,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { 0 }
         guardarEventos(eventosGuardados().filter { it != nombre })
         prefs.edit().remove("terreno_$nombre").remove("med_$nombre").remove("tipos_$nombre").remove("caldera_$nombre")
-            .remove("insp_$nombre").remove("cond_$nombre").apply()
+            .remove("insp_$nombre").remove("cond_$nombre").remove("tipoEv_$nombre").apply()
         val quedan = resumenEventos()[nombre]?.first ?: 0
         if (quedan > 0)
             aviso("Se borraron $borradas fotos. Quedan $quedan que la app no puede borrar: elimínalas desde Mis archivos.")
@@ -882,11 +898,16 @@ class MainActivity : AppCompatActivity() {
         return l
     }
 
+    // En un evento por elementos la carpeta principal es la del evento (sin subcarpeta de inspección)
     private fun carpetaNodo(ii: Int, r: List<Int>) =
-        "$raiz/$evento/" + (listOfNotNull(insps.getOrNull(ii)?.nodo) + cadena(ii, r)).joinToString("") { it.nombre + "/" }
+        "$raiz/$evento/" + ((if (esElementos()) emptyList<Nodo>() else listOfNotNull(insps.getOrNull(ii)?.nodo)) + cadena(ii, r))
+            .joinToString("") { it.nombre + "/" }
 
-    private fun codigoNodo(ii: Int, r: List<Int>) =
-        (listOfNotNull(insps.getOrNull(ii)?.nodo) + cadena(ii, r)).joinToString("-") { it.codigo }
+    private fun codigoNodo(ii: Int, r: List<Int>): String {
+        val cad = cadena(ii, r)
+        val l = if (esElementos() && cad.isNotEmpty()) cad else listOfNotNull(insps.getOrNull(ii)?.nodo) + cad
+        return l.joinToString("-") { it.codigo }
+    }
 
     /** Caminos de todos los nodos bajo [n] (sin incluirlo), en orden. */
     private fun todosNodos(n: Nodo, base: List<Int> = emptyList()): List<List<Int>> =
@@ -913,12 +934,84 @@ class MainActivity : AppCompatActivity() {
         tipos.none { it.nombre.equals(nombre, true) } && !nombre.equals("Notas en terreno", true) &&
         insps.withIndex().none { (i, x) -> i != excepto && x.nodo.nombre.equals(nombre, true) }
 
+    // ---------- Nombre de carpeta: escrito o leído desde una imagen (reconocimiento de texto) ----------
+
+    private var trasNombre: ((String) -> Unit)? = null
+    private var tituloNombre = ""
+    private val elegirImagenNombre = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) leerNombreDe(uri, false)
+    }
+
+    /** Pide un nombre: escribirlo, o leerlo desde una foto nueva o una imagen de la galería. */
+    private fun pedirNombre(titulo: String, inicial: String, ok: (String) -> Unit) {
+        menuGrande(titulo, listOf(
+            "⌨️  Escribir el nombre" to { dialogoTexto(titulo, inicial) { ok(it) } },
+            "📷  Leerlo desde una foto\nApunta a la placa, marca o rótulo" to {
+                trasNombre = ok; tituloNombre = titulo
+                buscarArchivo("$raiz/", "Lectura nombre.jpg")?.let { runCatching { contentResolver.delete(it, null, null) } }
+                val u = crearImagen("$raiz/", "Lectura nombre.jpg")
+                if (u == null) aviso("No se pudo crear el archivo") else lanzarCamara(u, "nombre")
+            },
+            "🖼  Leerlo desde una imagen de la galería" to {
+                trasNombre = ok; tituloNombre = titulo
+                runCatching { elegirImagenNombre.launch("image/*") }.onFailure { aviso("No hay galería disponible") }
+            }))
+    }
+
+    /** Reconoce el texto de la imagen (prueba también girada) y ofrece las líneas, la más grande primero. */
+    private fun leerNombreDe(uri: Uri, borrar: Boolean) {
+        val espera = AlertDialog.Builder(this).setMessage("Leyendo el texto de la imagen…").setCancelable(false).show()
+        fun fin(lineas: List<String>) {
+            runCatching { espera.dismiss() }
+            if (borrar) runCatching { contentResolver.delete(uri, null, null) }
+            val ok = trasNombre ?: return
+            val titulo = tituloNombre
+            if (lineas.isEmpty()) { aviso("No se encontró texto: escríbelo"); dialogoTexto(titulo, "") { ok(it) }; return }
+            menuGrande("Texto encontrado — toca el nombre", lineas.take(12).map { l ->
+                l to { dialogoTexto("Revisa o corrige el nombre", l) { ok(it) } }
+            } + ("⌨️  Escribir otro" to { dialogoTexto(titulo, "") { ok(it) } }))
+        }
+        val bmp = runCatching { cargarBitmap(uri, 2000) }.getOrNull() ?: run { fin(emptyList()); return }
+        val cliente = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        val giros = listOf(0, 90, 270)
+        fun intentar(i: Int) {
+            if (i >= giros.size) { fin(emptyList()); return }
+            cliente.process(InputImage.fromBitmap(bmp, giros[i]))
+                .addOnSuccessListener { t ->
+                    val lineas = t.textBlocks.flatMap { it.lines }
+                        .sortedByDescending { it.boundingBox?.height() ?: 0 }
+                        .map { it.text.trim() }.filter { it.isNotBlank() }.distinct()
+                    // además, cada bloque completo en una línea (ej. "PANEL" + "12")
+                    val bloques = t.textBlocks.filter { it.lines.size > 1 }.map { it.text.replace('\n', ' ').trim() }
+                    val todas = (lineas + bloques).distinct()
+                    if (todas.isNotEmpty()) fin(todas) else intentar(i + 1)
+                }
+                .addOnFailureListener { intentar(i + 1) }
+        }
+        intentar(0)
+    }
+
+    /** Evento de inspección por elementos (carpetas libres, sin singularidades ni plantillas). */
+    private fun esElementos(ev: String = evento) = prefs.getString("tipoEv_$ev", "") == "elem"
+
+    private fun crearEventoElementos() {
+        dialogoTexto("Nombre del evento (ej. Paneles Nueva Aldea)", "") { n0 ->
+            val nombre = limpiar(n0)
+            if (nombre in eventosGuardados() || prefs.contains("tipos_$nombre")) { aviso("Ya existe \"$nombre\""); return@dialogoTexto }
+            prefs.edit().putString("tipoEv_$nombre", "elem").putString("tipos_$nombre", "[]")
+                .putString("insp_$nombre", inspAJson(listOf(Insp(Nodo(nombre, sugerirCodigo(nombre)), mutableListOf()))))
+                .apply()
+            abrirEvento(nombre)
+        }
+    }
+
     private fun pantallaNodo() {
         val ii = inspActual
         val ins = insps[ii]
         val r = nodoRuta.toList()
         val nodo = nodoEn(ii, r) ?: return
         val prof = r.size
+        val elem = esElementos()
         title = nodo.nombre
         val col = columna()
         if (prof > 0) col.addView(texto((listOf(ins.nodo) + cadena(ii, r)).joinToString(" › ") { it.nombre }, 13f))
@@ -926,77 +1019,86 @@ class MainActivity : AppCompatActivity() {
         val conteo = contarFotos()
         val conNota = carpetasConNota()
         val cs = conds()
-        // Fotos y registros del propio elemento
+        val clave = claveNodo(ii, r)
         val ruta = carpetaNodo(ii, r)
         val tot = conteo[ruta]?.let { it.first + it.second } ?: 0
         val det = listOfNotNull(if (tot == 1) "1 foto" else "$tot fotos",
-            cs.optString(ruta).takeIf { it.isNotEmpty() }?.let { textoCond(it) },
-            if (ruta in conNota) "con nota" else null).joinToString(" · ")
-        col.addView(fila("📷 Fotos y registros: ${nodo.nombre}\n$det", { menuElemento(claveNodo(ii, r)) }) {
+            cs.optString(ruta).takeIf { it.isNotEmpty() }?.let { textoCond(it) }).joinToString(" · ")
+        col.addView(fila("📷 Fotos y registros\n$det · general, detalles, espesores, RA", { menuElemento(clave) }) {
             if (prof == 0) menuInsp(ii) else menuNodo(ii, r)
         })
+        val nota = if (ruta in conNota) leerNota(ruta) else ""
+        col.addView(fila("📝 Nota\n" + nota.ifBlank { "Sin nota — toca para escribir o dictar" }.take(200),
+            { editarNota(clave) }) { editarNota(clave) })
 
-        if (prof < ins.niveles.size) {
-            val nivel = ins.niveles[prof]
-            col.addView(espacio(8))
-            col.addView(texto("$nivel (${nodo.hijos.size})", 14f, true))
-            if (nodo.hijos.isEmpty()) col.addView(texto("Aún no hay elementos. Agrega uno o una serie numerada.", 13f))
-            else if (prof + 1 == ins.niveles.size) {
-                // Último nivel: grilla como la de singularidades
-                col.addView(leyenda())
-                val grid = GridLayout(this).apply { columnCount = 4 }
-                nodo.hijos.forEachIndexed { i, h ->
-                    val rh = r + i
-                    val rr = carpetaNodo(ii, rh)
-                    val inf = conteo[rr]
-                    val total = inf?.let { it.first + it.second } ?: 0
-                    val c = cs.optString(rr)
-                    grid.addView(Button(this).apply {
-                        val sub = (if (total == 1) "1 foto" else "$total fotos") +
-                            (when (c) { "ok" -> "\nOK"; "obs" -> "\nObs."; "crit" -> "\n⚠ Crítico"; else -> "" }) +
-                            (if (rr in conNota) "\ncon nota" else "")
-                        text = android.text.SpannableString("${h.codigo}\n$sub").apply {
-                            setSpan(android.text.style.RelativeSizeSpan(0.72f), h.codigo.length + 1, length, 0)
-                        }
-                        isAllCaps = false; typeface = medio; textSize = 15f
-                        setPadding(dp(2), dp(6), dp(2), dp(6)); maxLines = 4; minWidth = 0; minimumWidth = 0
-                        stateListAnimator = null; elevation = 0f
-                        val est = estado(inf)
-                        setTextColor(if (est == 0) C.tinta else Color.WHITE)
-                        val borde = when (c) { "crit" -> C.peligro; "obs" -> C.acento; else -> null }
-                        background = when (est) {
-                            2 -> fondoRedondeado(C.ok, 12, borde, 3)
-                            1 -> fondoRedondeado(C.parcial, 12, borde, 3)
-                            else -> fondoRedondeado(C.superficie, 12, borde ?: C.borde, if (borde != null) 3 else 1)
-                        }
-                        setOnClickListener { menuElemento(claveNodo(ii, rh)) }
-                        setOnLongClickListener { menuNodo(ii, rh); true }
-                        layoutParams = GridLayout.LayoutParams().apply {
-                            width = 0; height = dp(if (c.isNotEmpty() || rr in conNota) 96 else 84)
-                            columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
-                            setMargins(dp(4), dp(4), dp(4), dp(4))
-                        }
-                    })
-                }
-                col.addView(grid)
-                col.addView(texto("Mantén presionado un elemento para renombrarlo, moverlo o eliminarlo.", 12f))
-            } else nodo.hijos.forEachIndexed { i, h ->
+        // Subcarpetas: las que tienen contenido como filas; las vacías como grilla
+        col.addView(espacio(8))
+        col.addView(texto("Carpetas (${nodo.hijos.size})", 14f, true))
+        if (nodo.hijos.isEmpty()) col.addView(texto("Aún no hay carpetas. Genera una serie numerada o agrega una con nombre.", 13f))
+        nodo.hijos.forEachIndexed { i, h ->
+            if (h.hijos.isEmpty()) return@forEachIndexed
+            val rh = r + i
+            val hojas = elementosDe(h, rh)
+            val listos = hojas.count { (x, _) -> estado(conteo[carpetaNodo(ii, x)]) == 2 }
+            val criticos = (listOf(rh) + todosNodos(h, rh)).count { cs.optString(carpetaNodo(ii, it)) == "crit" }
+            col.addView(fila("📁 ${h.nombre}\n${h.hijos.size} carpeta(s) · $listos de ${hojas.size} completas" +
+                             (if (criticos > 0) " · ⚠ $criticos crítico(s)" else ""),
+                { nodoRuta.add(i); render() }, listos to hojas.size) { menuNodo(ii, rh) })
+        }
+        val hojasDirectas = nodo.hijos.withIndex().filter { it.value.hijos.isEmpty() }
+        if (hojasDirectas.isNotEmpty()) {
+            col.addView(leyenda())
+            val grid = GridLayout(this).apply { columnCount = 4 }
+            for ((i, h) in hojasDirectas) {
                 val rh = r + i
-                val hojas = elementosDe(h, rh)
-                val listos = hojas.count { (x, _) -> estado(conteo[carpetaNodo(ii, x)]) == 2 }
-                val criticos = (listOf(rh) + todosNodos(h, rh)).count { cs.optString(carpetaNodo(ii, it)) == "crit" }
-                val sub = ins.niveles[prof + 1]
-                col.addView(fila("${h.nombre}\n${h.hijos.size} × $sub · $listos de ${hojas.size} completos" +
-                                 (if (criticos > 0) " · ⚠ $criticos crítico(s)" else ""),
-                    { nodoRuta.add(i); render() }, listos to hojas.size) { menuNodo(ii, rh) })
+                val rr = carpetaNodo(ii, rh)
+                val inf = conteo[rr]
+                val total = inf?.let { it.first + it.second } ?: 0
+                val c = cs.optString(rr)
+                grid.addView(Button(this).apply {
+                    val sub = (if (total == 1) "1 foto" else "$total fotos") +
+                        (when (c) { "ok" -> "\nOK"; "obs" -> "\nObs."; "crit" -> "\n⚠ Crítico"; else -> "" }) +
+                        (if (rr in conNota) "\ncon nota" else "")
+                    text = android.text.SpannableString("${h.codigo}\n$sub").apply {
+                        setSpan(android.text.style.RelativeSizeSpan(0.72f), h.codigo.length + 1, length, 0)
+                    }
+                    isAllCaps = false; typeface = medio; textSize = 15f
+                    setPadding(dp(2), dp(6), dp(2), dp(6)); maxLines = 4; minWidth = 0; minimumWidth = 0
+                    stateListAnimator = null; elevation = 0f
+                    val est = estado(inf)
+                    setTextColor(if (est == 0) C.tinta else Color.WHITE)
+                    val borde = when (c) { "crit" -> C.peligro; "obs" -> C.acento; else -> null }
+                    background = when (est) {
+                        2 -> fondoRedondeado(C.ok, 12, borde, 3)
+                        1 -> fondoRedondeado(C.parcial, 12, borde, 3)
+                        else -> fondoRedondeado(C.superficie, 12, borde ?: C.borde, if (borde != null) 3 else 1)
+                    }
+                    setOnClickListener { menuElemento(claveNodo(ii, rh)) }
+                    setOnLongClickListener { menuNodo(ii, rh); true }
+                    layoutParams = GridLayout.LayoutParams().apply {
+                        width = 0; height = dp(if (c.isNotEmpty() || rr in conNota) 96 else 84)
+                        columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                        setMargins(dp(4), dp(4), dp(4), dp(4))
+                    }
+                })
             }
-            col.addView(boton("＋ Agregar $nivel") { agregarNodos(ii, r) })
-        } else if (ins.niveles.isEmpty())
-            col.addView(texto("Esta inspección no tiene niveles. Usa ✎ → Editar niveles para armar el árbol.", 13f))
+            col.addView(grid)
+            col.addView(texto("Toca una carpeta para fotos y nota (o \"Abrir carpeta\" para crear subcarpetas). " +
+                              "Mantén presionado para renombrar, mover o eliminar.", 12f))
+        }
+        if (prof < 8) {
+            col.addView(boton("＋ Generar carpetas numeradas (ej. 1 a 100)", Estilo.ACENTO) { agregarSerie(ii, r) })
+            col.addView(boton("＋ Agregar carpeta con nombre") { agregarCarpeta(ii, r) })
+        }
 
         col.addView(espacio(16))
-        col.addView(boton(if (prof == 0) "← Volver al evento" else "← Volver") {
-            if (prof == 0) inspActual = -1 else nodoRuta.removeAt(nodoRuta.size - 1)
+        if (prof == 0 && elem) {
+            col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
+            col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
+        }
+        col.addView(boton(when { prof > 0 -> "← Volver"; elem -> "← Cambiar evento"; else -> "← Volver al evento" }) {
+            if (prof > 0) nodoRuta.removeAt(nodoRuta.size - 1)
+            else { inspActual = -1; if (elem) enEvento = false }
             render()
         })
         col.addView(espacio(12))
@@ -1004,116 +1106,107 @@ class MainActivity : AppCompatActivity() {
         setContentView(scroll(col))
     }
 
-    private fun nuevaInspeccion() {
-        val modelos = listOf(
-            "Paneles y tubos" to listOf("Panel", "Tubo"),
-            "Por niveles" to listOf("Nivel", "Pared", "Tubo"),
-            "Solo tubos" to listOf("Tubo"))
-        menuGrande("Nueva inspección — ¿cómo se ordena?",
-            modelos.map { (n, l) -> "🌳  $n\n${l.joinToString(" › ")}" to { pedirDatosInsp(l) } } +
-            ("✏️  Definir mis niveles\nEj. Equipo › Panel › Tubo" to { pedirNiveles("") { pedirDatosInsp(it) } }))
-    }
-
-    private fun pedirNiveles(inicial: String, ok: (List<String>) -> Unit) {
-        dialogoTexto("Niveles de arriba hacia abajo, separados por coma (ej. Equipo, Panel, Tubo)", inicial) { s ->
-            val l = s.split(',', '›', '>').map { it.trim() }.filter { it.isNotEmpty() }.map { limpiar(it) }
-            if (l.size > 6) aviso("Máximo 6 niveles") else ok(l)
-        }
-    }
-
-    private fun pedirDatosInsp(niveles: List<String>) {
-        dialogoTexto("Nombre de la inspección (ej. Paneles Sobrecalentador)", "") { n0 ->
-            val nombre = limpiar(n0)
-            if (!nombreInspLibre(nombre)) { aviso("\"$nombre\" ya se usa en este evento"); return@dialogoTexto }
-            dialogoTexto("Código corto para los nombres de las fotos (ej. SC)", sugerirCodigo(nombre)) { c ->
-                insps.add(Insp(Nodo(nombre, codigoLimpio(c)), niveles.toMutableList()))
-                guardarInsp()
-                inspActual = insps.size - 1; nodoRuta.clear()
-                render()
-            }
-        }
-    }
-
     private fun menuInsp(ii: Int) {
-        val ins = insps[ii]
-        val n = ins.nodo
-        menuGrande(n.nombre, listOf(
-            "🌳  Abrir" to { inspActual = ii; nodoRuta.clear(); render() },
-            "✏️  Renombrar" to {
+        val n = insps[ii].nodo
+        val ops = mutableListOf<Pair<String, () -> Unit>>(
+            "✏️  Cambiar código de las fotos (${n.codigo})" to {
+                dialogoTexto("Código que va al inicio del nombre de las fotos de esta carpeta", n.codigo) { x ->
+                    n.codigo = codigoLimpio(x); guardarInsp(); render()
+                }
+            })
+        if (!esElementos()) {
+            ops.add(0, "🌳  Abrir" to { inspActual = ii; nodoRuta.clear(); render() })
+            ops.add("✏️  Renombrar" to {
                 dialogoTexto("Nuevo nombre (las fotos ya tomadas no se mueven)", n.nombre) { x ->
                     val nombre = limpiar(x)
                     if (!nombreInspLibre(nombre, ii)) aviso("\"$nombre\" ya se usa en este evento")
                     else { n.nombre = nombre; guardarInsp(); render() }
                 }
-            },
-            "✏️  Cambiar código (${n.codigo})" to {
-                dialogoTexto("Nuevo código", n.codigo) { x -> n.codigo = codigoLimpio(x); guardarInsp(); render() }
-            },
-            "✏️  Editar niveles (${ins.niveles.joinToString(" › ").ifEmpty { "sin niveles" }})" to {
-                pedirNiveles(ins.niveles.joinToString(", ")) { l ->
-                    val prof = profundidad(n)
-                    if (l.size < prof) aviso("El árbol ya tiene elementos en $prof niveles: deja al menos $prof")
-                    else { ins.niveles.clear(); ins.niveles.addAll(l); guardarInsp(); render() }
-                }
-            },
-            "↑  Subir" to { insps.mover(ii, -1); if (inspActual == ii) inspActual = maxOf(0, ii - 1); guardarInsp(); render() },
-            "↓  Bajar" to { insps.mover(ii, 1); if (inspActual == ii) inspActual = minOf(insps.size - 1, ii + 1); guardarInsp(); render() },
-            "🗑  Eliminar" to {
+            })
+            ops.add("🗑  Eliminar" to {
                 confirmar("¿Eliminar la inspección \"${n.nombre}\" y su árbol? Las fotos ya tomadas no se borran.") {
                     insps.removeAt(ii)
                     if (inspActual == ii) { inspActual = -1; nodoRuta.clear() } else if (inspActual > ii) inspActual--
                     guardarInsp(); render()
                 }
-            }))
+            })
+        }
+        menuGrande(n.nombre, ops)
     }
 
-    private fun agregarNodos(ii: Int, r: List<Int>) {
-        val ins = insps.getOrNull(ii) ?: return
+    private fun agregarCarpeta(ii: Int, r: List<Int>) {
         val nodo = nodoEn(ii, r) ?: return
-        val nivel = ins.niveles.getOrNull(r.size) ?: return
-        menuGrande("Agregar $nivel", listOf(
-            "＋  Serie numerada\nEj. $nivel 01 a $nivel 40" to { agregarSerie(ii, r, nivel) },
-            "＋  Uno con nombre propio\nEj. $nivel Norte, $nivel +12 m" to {
-                dialogoTexto("Nombre", "$nivel ") { n0 ->
-                    val nombre = limpiar(n0)
-                    if (nodo.hijos.any { it.nombre.equals(nombre, true) }) { aviso("Ya existe \"$nombre\""); return@dialogoTexto }
-                    dialogoTexto("Código corto para los nombres de las fotos", sugerirCodigo(nombre)) { c ->
-                        nodo.hijos.add(Nodo(nombre, codigoLimpio(c))); guardarInsp(); render()
-                    }
-                }
-            }))
-    }
-
-    private fun agregarSerie(ii: Int, r: List<Int>, nivel: String) {
-        val nodo = nodoEn(ii, r) ?: return
-        val ini = nivel.take(1).uppercase()
-        dialogoTexto("Prefijo del código (ej. $ini → ${ini}01, ${ini}02…)", ini) { p0 ->
-            val pref = codigoLimpio(p0)
-            dialogoTexto("Desde el número", (nodo.hijos.size + 1).toString(), true) { a ->
-                val x = a.toIntOrNull() ?: run { aviso("Número no válido"); return@dialogoTexto }
-                dialogoTexto("Hasta el número", (x + 9).toString(), true) { b ->
-                    val y = b.toIntOrNull()
-                    if (y == null || y < x || y - x >= 500) { aviso("Rango no válido (hasta 500 por vez)"); return@dialogoTexto }
-                    var n = 0
-                    for (k in x..y) {
-                        val nombre = "%s %02d".format(nivel, k)
-                        if (nodo.hijos.none { it.nombre.equals(nombre, true) }) { nodo.hijos.add(Nodo(nombre, "%s%02d".format(pref, k))); n++ }
-                    }
-                    guardarInsp()
-                    aviso(if (n == 0) "Ya existían todos" else "$n agregados")
-                    render()
-                }
+        pedirNombre("Nombre de la carpeta (ej. Nivel +12 m, Pared Frontal)", "") { n0 ->
+            val nombre = limpiar(n0)
+            if (r.isEmpty() && nombre.equals("Notas en terreno", true)) { aviso("Ese nombre está reservado"); return@pedirNombre }
+            if (nodo.hijos.any { it.nombre.equals(nombre, true) }) { aviso("Ya existe \"$nombre\""); return@pedirNombre }
+            dialogoTexto("Código corto para el nombre de las fotos", sugerirCodigo(nombre)) { c ->
+                nodo.hijos.add(Nodo(nombre, codigoLimpio(c))); guardarInsp(); render()
             }
         }
     }
 
+    /** Un solo diálogo: nombre base, desde, hasta y código → "Tubo 001" … "Tubo 100" (código T001…). */
+    private fun agregarSerie(ii: Int, r: List<Int>) {
+        val nodo = nodoEn(ii, r) ?: return
+        fun campo(hint: String, valor: String, numero: Boolean) = EditText(this).apply {
+            this.hint = hint; setText(valor); textSize = 18f
+            inputType = if (numero) InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        }
+        val base = campo("Nombre base (ej. Tubo, Panel)", "", false)
+        val desde = campo("Desde", "1", true)
+        val hasta = campo("Hasta", "100", true)
+        val cod = campo("Código para las fotos (ej. T)", "", false)
+        val vista = TextView(this).apply { textSize = 13f; setTextColor(C.tenue) }
+        fun ancho(y: Int) = maxOf(2, y.toString().length)
+        fun nombreBase() = base.text.toString().trim().let { if (it.isEmpty()) "" else limpiar(it) }
+        fun codigoBase(b: String) = cod.text.toString().trim().let {
+            if (it.isNotEmpty()) codigoLimpio(it) else if (b.isNotEmpty()) codigoLimpio(b.take(1).uppercase()) else ""
+        }
+        fun actualizar() {
+            val b = nombreBase(); val c = codigoBase(b)
+            val x = desde.text.toString().toIntOrNull(); val y = hasta.text.toString().toIntOrNull()
+            vista.text = if (x == null || y == null || y < x) "Revisa los números"
+                else {
+                    val f = "%0${ancho(y)}d"; val pre = if (b.isEmpty()) "" else "$b "
+                    "Se crearán ${y - x + 1} carpetas: \"$pre${f.format(x)}\" … \"$pre${f.format(y)}\"\n" +
+                    "Fotos: …${c}${f.format(x)}_general_1.jpg"
+                }
+        }
+        val w = object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) { actualizar() }
+        }
+        val col = columna()
+        for ((t, e) in listOf("Nombre base" to base, "Desde" to desde, "Hasta" to hasta, "Código (opcional)" to cod)) {
+            col.addView(texto(t, 13f, true)); col.addView(e); e.addTextChangedListener(w)
+        }
+        col.addView(vista); actualizar()
+        mostrar(AlertDialog.Builder(this).setTitle("Generar carpetas numeradas").setView(scroll(col))
+            .setPositiveButton("Generar") { _, _ ->
+                val b = nombreBase(); val c = codigoBase(b)
+                val x = desde.text.toString().toIntOrNull(); val y = hasta.text.toString().toIntOrNull()
+                if (x == null || y == null || x < 0 || y < x || y - x >= 1000) { aviso("Rango no válido (hasta 1000 por vez)"); return@setPositiveButton }
+                val f = "%0${ancho(y)}d"
+                var n = 0
+                for (k in x..y) {
+                    val num = f.format(k)
+                    val nombre = if (b.isEmpty()) num else "$b $num"
+                    if (nodo.hijos.none { it.nombre.equals(nombre, true) }) { nodo.hijos.add(Nodo(nombre, c + num)); n++ }
+                }
+                guardarInsp()
+                aviso(if (n == 0) "Ya existían todas" else "$n carpetas creadas")
+                render()
+            }
+            .setNegativeButton("Cancelar", null).create())
+    }
+
     private fun menuNodo(ii: Int, r: List<Int>) {
         if (r.isEmpty()) { menuInsp(ii); return }
-        val ins = insps.getOrNull(ii) ?: return
         val padre = nodoEn(ii, r.dropLast(1)) ?: return
         val i = r.last()
         val n = padre.hijos.getOrNull(i) ?: return
-        val sub = ins.niveles.getOrNull(r.size)
         // si la pantalla actual está dentro de este nodo, se ajusta al moverlo o eliminarlo
         val dentro = nodoRuta.size >= r.size && nodoRuta.subList(0, r.size) == r
         fun moverA(d: Int) {
@@ -1123,9 +1216,10 @@ class MainActivity : AppCompatActivity() {
             guardarInsp(); render()
         }
         val ops = mutableListOf<Pair<String, () -> Unit>>(
+            "📁  Abrir carpeta (subcarpetas)" to { nodoRuta.clear(); nodoRuta.addAll(r); render() },
             "📷  Fotos y registros" to { menuElemento(claveNodo(ii, r)) },
             "✏️  Renombrar" to {
-                dialogoTexto("Nuevo nombre (las fotos ya tomadas no se mueven)", n.nombre) { x ->
+                pedirNombre("Nuevo nombre (las fotos ya tomadas no se mueven)", n.nombre) { x ->
                     val nombre = limpiar(x)
                     if (padre.hijos.any { it !== n && it.nombre.equals(nombre, true) }) aviso("Ya existe \"$nombre\"")
                     else { n.nombre = nombre; guardarInsp(); render() }
@@ -1136,21 +1230,18 @@ class MainActivity : AppCompatActivity() {
             },
             "↑  Subir" to { moverA(-1) },
             "↓  Bajar" to { moverA(1) })
-        if (sub != null) ops.add("＋  Agregar $sub dentro de ${n.nombre}" to {
-            nodoRuta.clear(); nodoRuta.addAll(r); render(); agregarNodos(ii, r)
-        })
-        if (n.hijos.isNotEmpty() && padre.hijos.size > 1) ops.add("🌳  Copiar su contenido a los demás\n${n.hijos.size} × $sub a los vacíos de este nivel" to {
+        if (n.hijos.isNotEmpty() && padre.hijos.size > 1) ops.add("📁  Copiar sus subcarpetas a las demás\n${n.hijos.size} subcarpetas a las carpetas vacías de este nivel" to {
             val destinos = padre.hijos.filter { it !== n && it.hijos.isEmpty() }
-            if (destinos.isEmpty()) aviso("Los demás ya tienen contenido")
-            else confirmar("¿Copiar el contenido de ${n.nombre} (${n.hijos.size} × $sub) a ${destinos.size} elemento(s) " +
-                           "vacío(s) de este nivel? Los que ya tienen contenido no cambian.") {
+            if (destinos.isEmpty()) aviso("Las demás ya tienen subcarpetas")
+            else confirmar("¿Copiar las ${n.hijos.size} subcarpetas de ${n.nombre} a ${destinos.size} carpeta(s) " +
+                           "vacía(s) de este nivel? Las que ya tienen subcarpetas no cambian.") {
                 destinos.forEach { d -> n.hijos.forEach { d.hijos.add(copiaNodo(it)) } }
                 guardarInsp(); aviso("Copiado a ${destinos.size}"); render()
             }
         })
         ops.add("🗑  Eliminar" to {
             val bajo = todosNodos(n).size
-            confirmar("¿Eliminar ${n.nombre}" + (if (bajo > 0) " y los $bajo elementos que contiene" else "") +
+            confirmar("¿Eliminar ${n.nombre}" + (if (bajo > 0) " y sus $bajo subcarpetas" else "") +
                       "? Las fotos ya tomadas no se borran.") {
                 padre.hijos.removeAt(i)
                 if (dentro) { while (nodoRuta.size >= r.size) nodoRuta.removeAt(nodoRuta.size - 1) }
@@ -2208,8 +2299,7 @@ class MainActivity : AppCompatActivity() {
     private fun guardarComoPlantilla() {
         val previo = prefs.getString("caldera_$evento", null)
         mostrar(AlertDialog.Builder(this).setTitle("Guardar como plantilla de caldera")
-            .setMessage("Guarda los tipos de singularidad (paredes y cantidades) y las inspecciones por elementos " +
-                        "(su árbol de paneles, tubos o niveles) de este evento para " +
+            .setMessage("Guarda los tipos de singularidad, sus paredes y cantidades de este evento para " +
                         "precargarlos en los próximos eventos de esa caldera.\n\nNo cambia fotos, notas ni mediciones.")
             .setPositiveButton("Continuar") { _, _ -> pedirPlantilla(previo) }
             .setNegativeButton("Cancelar", null).create())
@@ -2222,7 +2312,7 @@ class MainActivity : AppCompatActivity() {
                 val id = idCaldera(pl, limpiar(c0))
                 val hacer = {
                     val ed = prefs.edit().putString("tpl_$id", aJson(tipos)).putString("caldera_$evento", id)
-                    if (insps.isEmpty()) ed.remove("tplinsp_$id") else ed.putString("tplinsp_$id", inspAJson(insps))
+                    ed.remove("tplinsp_$id")   // las inspecciones por elementos no van en la plantilla
                     ed.apply()
                     guardarListaPrefs("plantas", plantas() + pl)
                     guardarListaPrefs("calderas", calderas() + id)
@@ -2695,9 +2785,9 @@ class MainActivity : AppCompatActivity() {
         // por cada elemento del primer nivel (o la inspección completa si no tiene niveles).
         insps.forEachIndexed { ii, ins ->
             val h = x.hoja(ins.nodo.nombre,
-                listOf("Ubicación", "Nivel", "Código", "Estado", "Condición", "Generales", "Detalles", "Marcadas", "Nota",
+                listOf("Ubicación", "Código", "Estado", "Condición", "Generales", "Detalles", "Marcadas", "Nota",
                        "Espesores (mm)", "Espesor mín. (mm)", "Mediciones RA"),
-                listOf(34, 12, 16, 12, 13, 11, 10, 10, 45, 40, 16, 40))
+                listOf(40, 16, 12, 13, 11, 10, 10, 45, 40, 16, 40))
             for (r in listOf(emptyList<Int>()) + todosNodos(ins.nodo)) {
                 val d = destDe(claveNodo(ii, r)) ?: continue
                 val f = datos(d.ruta)
@@ -2705,9 +2795,8 @@ class MainActivity : AppCompatActivity() {
                 // la raíz solo aparece si tiene algo registrado
                 if (r.isEmpty() && nodo.hijos.isNotEmpty() && f.gen + f.det + f.marc == 0 && f.nota.isBlank() &&
                     f.cond.isEmpty() && f.textoEsp.isBlank() && f.textoRA.isBlank()) continue
-                val ubic = if (r.isEmpty()) ins.nodo.nombre else cadena(ii, r).joinToString(" › ") { it.nombre }
-                val nivel = if (r.isEmpty()) "Inspección" else ins.niveles.getOrElse(r.size - 1) { "" }
-                h.fila(ubic, nivel, d.codigo, textoEstado(f.est), condCelda(f.cond), f.gen, f.det,
+                val ubic = if (r.isEmpty()) "(carpeta principal)" else cadena(ii, r).joinToString(" › ") { it.nombre }
+                h.fila(ubic, d.codigo, textoEstado(f.est), condCelda(f.cond), f.gen, f.det,
                     if (f.marc > 0) f.marc else null, f.nota.ifBlank { null }, f.textoEsp.ifBlank { null }, f.min,
                     f.textoRA.ifBlank { null })
             }
