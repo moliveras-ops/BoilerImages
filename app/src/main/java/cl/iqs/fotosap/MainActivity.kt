@@ -52,6 +52,11 @@ class MainActivity : AppCompatActivity() {
     data class Pared(var nombre: String, var cantidad: Int)
     data class Tipo(var nombre: String, var prefijo: String, val paredes: MutableList<Pared>)
 
+    /** Elemento de una inspección por árbol (panel, tubo, nivel, pared…). */
+    class Nodo(var nombre: String, var codigo: String, val hijos: MutableList<Nodo> = mutableListOf())
+    /** Inspección por árbol: [niveles] nombra cada nivel de arriba hacia abajo (ej. Panel, Tubo). */
+    class Insp(val nodo: Nodo, val niveles: MutableList<String>)
+
     // Documents permite guardar fotos y notas .txt en la misma carpeta
     private val raiz = "Documents/BoilerImage"
     private val MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -115,7 +120,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().remove("pendRA").apply()
         if (d == null) return@registerForActivityResult
         if (d.optString("origen") == "terreno") enTerreno = true
-        else if (d.optInt("ti") >= 0) { enEvento = true; tipoActual = d.optInt("ti"); paredActual = d.optInt("pi") }
+        else d.optString("clave").takeIf { it.isNotEmpty() }?.let { irA(it) }
         if (res.resultCode != RESULT_OK || res.data == null) { render(); return@registerForActivityResult }
         val nombre = res.data!!.getStringExtra("nombre") ?: return@registerForActivityResult
         val resumen = res.data!!.getStringExtra("resumen") ?: ""
@@ -137,13 +142,14 @@ class MainActivity : AppCompatActivity() {
     private var plantilla: String? = null   // caldera que se está editando
     private var tipoActual = -1
     private var paredActual = -1
+    private var insps = mutableListOf<Insp>()
+    private var inspActual = -1                    // inspección por árbol abierta
+    private val nodoRuta = mutableListOf<Int>()     // camino de índices dentro de la inspección
 
     private val camara = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val uri = prefs.getString("pendUri", null)?.let(Uri::parse)
         val modo = prefs.getString("pendModo", "") ?: ""
-        val ti = prefs.getInt("pendTipo", -1)
-        val pi = prefs.getInt("pendPared", -1)
-        val n = prefs.getInt("pendNum", -1)
+        val clave = prefs.getString("pendClave", "") ?: ""
         prefs.edit().remove("pendUri").apply()
         android.util.Log.i("BoilerImage", "camara ok=$ok modo=$modo uri=$uri")
 
@@ -154,12 +160,12 @@ class MainActivity : AppCompatActivity() {
 
         if (!ok) {
             uri?.let { runCatching { contentResolver.delete(it, null, null) } }
-        } else if (modo == "detalle" && ti >= 0 && pi >= 0 && n > 0) {
+        } else if (modo == "detalle" && destDe(clave) != null) {
             // Modo ráfaga: vuelve a abrir la cámara hasta que el usuario cancele
-            tomarFotoSistema(ti, pi, n, "detalle")
+            tomarFotoSistema(clave, "detalle")
             return@registerForActivityResult
         }
-        if (ti >= 0) { enEvento = true; tipoActual = ti; paredActual = pi }
+        if (clave.isNotEmpty()) irA(clave)
         render()
     }
 
@@ -181,11 +187,14 @@ class MainActivity : AppCompatActivity() {
         enTerreno = savedInstanceState?.getBoolean("enTerreno", false) ?: false
         tipoActual = savedInstanceState?.getInt("tipo", -1) ?: -1
         paredActual = savedInstanceState?.getInt("pared", -1) ?: -1
+        inspActual = savedInstanceState?.getInt("insp", -1) ?: -1
+        savedInstanceState?.getString("nodoRuta")?.split('.')?.mapNotNull { it.toIntOrNull() }?.let { nodoRuta.addAll(it) }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
                     prefs.contains("pendMed") -> descartarMedicion()
                     enTerreno -> { enTerreno = false; enEvento = false; render() }
+                    inspActual >= 0 -> { if (nodoRuta.isEmpty()) inspActual = -1 else nodoRuta.removeAt(nodoRuta.size - 1); render() }
                     paredActual >= 0 -> { paredActual = -1; render() }
                     tipoActual >= 0 -> { tipoActual = -1; render() }
                     plantilla != null -> cerrarPlantilla()
@@ -254,6 +263,8 @@ class MainActivity : AppCompatActivity() {
         outState.putString("plantilla", plantilla)
         outState.putInt("tipo", tipoActual)
         outState.putInt("pared", paredActual)
+        outState.putInt("insp", inspActual)
+        outState.putString("nodoRuta", nodoRuta.joinToString("."))
     }
 
     // ---------- Datos ----------
@@ -284,6 +295,7 @@ class MainActivity : AppCompatActivity() {
         val s = prefs.getString(claveTipos(), null)
             ?: (if (plantilla == null) prefs.getString("tipos", null) else null)
         tipos = desdeJson(s) ?: porDefecto()
+        insps = inspDesdeJson(prefs.getString(claveInsp(), null))
     }
 
     private fun desdeJson(s: String?): MutableList<Tipo>? {
@@ -337,6 +349,8 @@ class MainActivity : AppCompatActivity() {
     private fun render() {
         if (tipoActual !in tipos.indices) { tipoActual = -1; paredActual = -1 }
         if (tipoActual >= 0 && paredActual !in tipos[tipoActual].paredes.indices) paredActual = -1
+        if (inspActual !in insps.indices) { inspActual = -1; nodoRuta.clear() }
+        while (inspActual >= 0 && nodoRuta.isNotEmpty() && nodoEn(inspActual, nodoRuta) == null) nodoRuta.removeAt(nodoRuta.size - 1)
         when {
             prefs.contains("pendMed") -> pantallaMedicion()
             enTerreno -> pantallaTerreno()
@@ -345,6 +359,7 @@ class MainActivity : AppCompatActivity() {
             enCalderas && plantaActual != null -> pantallaPlanta(plantaActual!!)
             enCalderas -> pantallaPlantas()
             !enEvento -> pantallaEventos()
+            inspActual >= 0 -> pantallaNodo()
             tipoActual < 0 -> pantallaTipos()
             paredActual < 0 -> pantallaTipo(tipoActual)
             else -> pantallaPared(tipoActual, paredActual)
@@ -419,6 +434,18 @@ class MainActivity : AppCompatActivity() {
             }
         }
         col.addView(boton("＋ Agregar tipo") { agregarTipo() })
+        col.addView(espacio(12))
+        col.addView(texto("Inspecciones por elementos (paneles, tubos, niveles…)", 14f, true))
+        if (insps.isEmpty()) col.addView(texto("Arma tu propio árbol, por ejemplo Panel › Tubo o Nivel › Pared › Tubo.", 13f))
+        insps.forEachIndexed { ii, ins ->
+            val hojas = elementosDe(ins.nodo)
+            val listos = hojas.count { (r, _) -> estado(conteo[carpetaNodo(ii, r)]) == 2 }
+            val niv = if (ins.niveles.isEmpty()) "sin niveles" else ins.niveles.joinToString(" › ")
+            col.addView(fila("🌳 ${ins.nodo.nombre}\n$listos de ${hojas.size} elementos completos · $niv",
+                { inspActual = ii; nodoRuta.clear(); render() }, listos to hojas.size) { menuInsp(ii) })
+        }
+        col.addView(boton("＋ Nueva inspección por elementos") { nuevaInspeccion() })
+        col.addView(espacio(12))
         col.addView(boton("💾  Guardar como plantilla de caldera") { guardarComoPlantilla() })
         col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
         col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
@@ -479,7 +506,7 @@ class MainActivity : AppCompatActivity() {
                     1 -> fondoRedondeado(C.parcial, 12)
                     else -> fondoRedondeado(C.superficie, 12, C.borde)
                 }
-                setOnClickListener { menuSingularidad(ti, pi, n, info) }
+                setOnClickListener { menuElemento(claveSing(ti, pi, n)) }
                 layoutParams = GridLayout.LayoutParams().apply {
                     width = 0; height = dp(84)
                     columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
@@ -552,7 +579,7 @@ class MainActivity : AppCompatActivity() {
         guardarEventos(eventosGuardados() + nombre)
         plantilla = null; enCalderas = false; plantaActual = null
         cargar()
-        enEvento = true; tipoActual = -1; paredActual = -1
+        enEvento = true; tipoActual = -1; paredActual = -1; inspActual = -1; nodoRuta.clear()
         render()
     }
 
@@ -598,7 +625,8 @@ class MainActivity : AppCompatActivity() {
                 "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?", arrayOf("$raiz/$nombre/%"))
         } catch (e: Exception) { 0 }
         guardarEventos(eventosGuardados().filter { it != nombre })
-        prefs.edit().remove("terreno_$nombre").remove("med_$nombre").remove("tipos_$nombre").remove("caldera_$nombre").apply()
+        prefs.edit().remove("terreno_$nombre").remove("med_$nombre").remove("tipos_$nombre").remove("caldera_$nombre")
+            .remove("insp_$nombre").remove("cond_$nombre").apply()
         val quedan = resumenEventos()[nombre]?.first ?: 0
         if (quedan > 0)
             aviso("Se borraron $borradas fotos. Quedan $quedan que la app no puede borrar: elimínalas desde Mis archivos.")
@@ -663,69 +691,473 @@ class MainActivity : AppCompatActivity() {
             }.show()
     }
 
-    private fun menuSingularidad(ti: Int, pi: Int, n: Int, info: Pair<Int, Int>?) {
-        val t = tipos[ti]
-        val p = t.paredes[pi]
-        val nota = leerNota(carpeta(t, p, n))
+    // ---------- Elementos: singularidades y elementos de inspecciones por árbol ----------
+    // Cada elemento se identifica con una clave: "s/<tipo>/<pared>/<n>" (singularidad) o
+    // "n/<inspección>/<i.j.k>" (elemento del árbol; camino vacío = la inspección misma).
+    // Fotos, nota, condición, espesores y RA funcionan igual para los dos.
+
+    private class Dest(val clave: String, val ruta: String, val codigo: String, val corto: String,
+                       val titulo: String, val grupo: String)
+
+    private fun claveSing(ti: Int, pi: Int, n: Int) = "s/$ti/$pi/$n"
+    private fun claveNodo(ii: Int, r: List<Int>) = "n/$ii/${r.joinToString(".")}"
+    private fun rutaDeClave(c: String) = c.split('/').getOrElse(2) { "" }.split('.').mapNotNull { it.toIntOrNull() }
+
+    private fun destDe(clave: String): Dest? {
+        val p = clave.split('/')
+        return when (p.getOrNull(0)) {
+            "s" -> {
+                val t = tipos.getOrNull(p.getOrNull(1)?.toIntOrNull() ?: -1) ?: return null
+                val pa = t.paredes.getOrNull(p.getOrNull(2)?.toIntOrNull() ?: -1) ?: return null
+                val n = p.getOrNull(3)?.toIntOrNull()?.takeIf { it in 1..pa.cantidad } ?: return null
+                val cod = "%s%02d".format(t.prefijo, n)
+                Dest(clave, carpeta(t, pa, n), cod, cod, "%s %02d — %s".format(t.prefijo, n, pa.nombre), pa.nombre)
+            }
+            "n" -> {
+                val ii = p.getOrNull(1)?.toIntOrNull() ?: return null
+                val ins = insps.getOrNull(ii) ?: return null
+                val r = rutaDeClave(clave)
+                val nodo = nodoEn(ii, r) ?: return null
+                val cad = cadena(ii, r)
+                val titulo = (listOf(ins.nodo) + cad).joinToString(" › ") { it.nombre }
+                val grupo = if (cad.size <= 1) ins.nodo.nombre else cad.dropLast(1).joinToString(" › ") { it.nombre }
+                Dest(clave, carpetaNodo(ii, r), codigoNodo(ii, r), nodo.codigo, titulo, grupo)
+            }
+            else -> null
+        }
+    }
+
+    /** Elementos entre los que se salta con ‹ › (y en la cámara): todas las singularidades del tipo,
+     *  o todos los elementos del mismo nivel de la inspección. */
+    private fun vecinos(clave: String): List<String> {
+        val p = clave.split('/')
+        val i1 = p.getOrNull(1)?.toIntOrNull() ?: return listOf(clave)
+        val l: List<String>? = when (p[0]) {
+            "s" -> tipos.getOrNull(i1)?.paredes?.flatMapIndexed { j, pa -> (1..pa.cantidad).map { claveSing(i1, j, it) } }
+            else -> {
+                val r = rutaDeClave(clave)
+                if (r.isEmpty()) null
+                else insps.getOrNull(i1)?.let { ins -> todosNodos(ins.nodo).filter { it.size == r.size }.map { claveNodo(i1, it) } }
+            }
+        }
+        return l ?: listOf(clave)
+    }
+
+    /** Deja la navegación en la pantalla donde se ve el elemento. */
+    private fun irA(clave: String) {
+        val p = clave.split('/')
+        enEvento = true; enTerreno = false
+        when (p.getOrNull(0)) {
+            "s" -> {
+                inspActual = -1; nodoRuta.clear()
+                tipoActual = p.getOrNull(1)?.toIntOrNull() ?: -1; paredActual = p.getOrNull(2)?.toIntOrNull() ?: -1
+            }
+            "n" -> {
+                tipoActual = -1; paredActual = -1
+                inspActual = p.getOrNull(1)?.toIntOrNull() ?: -1
+                val r = rutaDeClave(clave)
+                val n = nodoEn(inspActual, r)
+                nodoRuta.clear()
+                nodoRuta.addAll(if (r.isEmpty() || (n != null && n.hijos.isNotEmpty())) r else r.dropLast(1))
+            }
+        }
+    }
+
+    // Condición del elemento (OK / observación / crítico), en prefs "cond_<evento>": ruta -> código
+    private val condiciones = listOf("" to "Sin evaluar", "ok" to "OK", "obs" to "Observación", "crit" to "Crítico")
+    private fun conds(): JSONObject = runCatching { JSONObject(prefs.getString("cond_$evento", null) ?: "{}") }.getOrDefault(JSONObject())
+    private fun textoCond(c: String) = condiciones.firstOrNull { it.first == c }?.second ?: "Sin evaluar"
+    private fun ponerCond(ruta: String, c: String) {
+        val o = conds()
+        if (c.isEmpty()) o.remove(ruta) else o.put(ruta, c)
+        prefs.edit().putString("cond_$evento", o.toString()).apply()
+    }
+
+    private fun elegirCondicion(clave: String) {
+        val d = destDe(clave) ?: return
+        menuGrande("Condición — ${d.titulo}", condiciones.map { (c, t) ->
+            "🚦  $t" to { ponerCond(d.ruta, c); render(); menuElemento(clave) }
+        })
+    }
+
+    private fun menuElemento(clave: String) {
+        val d = destDe(clave) ?: return
+        val info = contarFotos()[d.ruta]
+        val nota = leerNota(d.ruta)
+        val cond = conds().optString(d.ruta)
         val col = columna()
         col.addView(texto("Generales: ${info?.first ?: 0}   ·   Detalles: ${info?.second ?: 0}", 14f))
+        if (cond.isNotEmpty()) col.addView(texto("Condición: ${textoCond(cond)}", 14f, true).apply {
+            if (cond == "crit") setTextColor(C.peligro)
+        })
         col.addView(texto(if (nota.isBlank()) "Sin nota" else "📝 $nota", 13f))
         col.addView(espacio(8))
         val dlg = AlertDialog.Builder(this)
-            .setTitle("%s %02d — %s".format(t.prefijo, n, p.nombre))
+            .setTitle(d.titulo)
             .setView(scroll(col))
             .setNegativeButton("Cerrar", null)
             .create()
         val totalFotos = (info?.first ?: 0) + (info?.second ?: 0)
         if (totalFotos > 0) col.addView(boton("🖼  Ver fotos capturadas ($totalFotos)", Estilo.PRIMARIO) {
             dlg.dismiss()
-            galeriaFotos("%s %02d — %s".format(t.prefijo, n, p.nombre), carpeta(t, p, n))
+            galeriaFotos(d.titulo, d.ruta)
         })
-        col.addView(boton("📷  Foto general") { dlg.dismiss(); tomarFoto(ti, pi, n, "general") })
-        col.addView(boton(if (camaraPropia()) "🔍  Detalles" else "🔍  Detalles (ráfaga)") { dlg.dismiss(); tomarFoto(ti, pi, n, "detalle") })
-        col.addView(boton("📝  Nota (escribir o dictar)") { dlg.dismiss(); editarNota(ti, pi, n) })
-        col.addView(boton("📍  Foto con puntos de espesor") { dlg.dismiss(); medicionSingularidad(ti, pi, n) })
-        col.addView(boton("📐  Medir con realidad aumentada") { dlg.dismiss(); medirRASingularidad(ti, pi, n) })
+        col.addView(boton("📷  Foto general") { dlg.dismiss(); tomarFoto(clave, "general") })
+        col.addView(boton(if (camaraPropia()) "🔍  Detalles" else "🔍  Detalles (ráfaga)") { dlg.dismiss(); tomarFoto(clave, "detalle") })
+        col.addView(boton("📝  Nota (escribir o dictar)") { dlg.dismiss(); editarNota(clave) })
+        col.addView(boton("🚦  Condición: ${textoCond(cond)}") { dlg.dismiss(); elegirCondicion(clave) })
+        col.addView(boton("📍  Foto con puntos de espesor") { dlg.dismiss(); medicionEn(clave) })
+        col.addView(boton("📐  Medir con realidad aumentada") { dlg.dismiss(); medirRAEn(clave) })
         col.addView(texto(if (camaraPropia()) "Cámara BoilerImage: toma varias fotos seguidas, cambia General/Detalle " +
-                          "y salta a la siguiente singularidad sin salir. Las teclas de volumen disparan."
+                          "y salta al siguiente elemento sin salir. Las teclas de volumen disparan."
                           else "Ráfaga: la cámara se vuelve a abrir después de cada foto. " +
                           "Presiona Atrás en la cámara para terminar.", 12f))
-        // Saltar a la singularidad anterior / siguiente (pasa a la pared vecina en los extremos)
+        // Saltar al elemento anterior / siguiente (pasa al grupo vecino en los extremos)
+        val lista = vecinos(clave)
+        val k = lista.indexOf(clave)
         val nav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun destino(d: Int): Pair<Int, Int>? {
-            val m = n + d
-            return when {
-                m in 1..p.cantidad -> pi to m
-                d > 0 && pi + 1 < t.paredes.size -> pi + 1 to 1
-                d < 0 && pi > 0 -> pi - 1 to t.paredes[pi - 1].cantidad
-                else -> null
-            }
-        }
-        fun etiqueta(dst: Pair<Int, Int>) = "%s%02d".format(t.prefijo, dst.second) +
-            if (dst.first != pi) "\n" + t.paredes[dst.first].nombre else ""
-        fun ir(dst: Pair<Int, Int>) {
+        fun etiqueta(dst: Dest) = dst.corto + if (dst.grupo != d.grupo) "\n" + dst.grupo else ""
+        fun ir(dst: Dest) {
             dlg.dismiss()
-            window.decorView.post {
-                if (dst.first != paredActual) { paredActual = dst.first; render() }
-                val c = contarFotos()[carpeta(t, t.paredes[dst.first], dst.second)]
-                menuSingularidad(ti, dst.first, dst.second, c)
-            }
+            window.decorView.post { irA(dst.clave); render(); menuElemento(dst.clave) }
         }
-        for (d in listOf(-1, 1)) {
-            val dst = destino(d)
-            nav.addView(boton(if (dst == null) "—" else if (d < 0) "‹  ${etiqueta(dst)}" else "${etiqueta(dst)}  ›",
+        for (paso in listOf(-1, 1)) {
+            val dst = if (k < 0) null else lista.getOrNull(k + paso)?.let { destDe(it) }
+            nav.addView(boton(if (dst == null) "—" else if (paso < 0) "‹  ${etiqueta(dst)}" else "${etiqueta(dst)}  ›",
                               Estilo.PLANO) { dst?.let { ir(it) } }.apply {
                 isEnabled = dst != null; alpha = if (dst == null) 0.35f else 1f
                 gravity = Gravity.CENTER; textSize = 17f
                 setCompoundDrawablesRelative(null, null, null, null)
                 background = fondoRedondeado(C.primarioSuave, 14)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    setMargins(if (d < 0) 0 else dp(5), dp(4), if (d < 0) dp(5) else 0, dp(4))
+                    setMargins(if (paso < 0) 0 else dp(5), dp(4), if (paso < 0) dp(5) else 0, dp(4))
                 }
             })
         }
-        col.addView(nav, 2)   // arriba, visible sin desplazar
+        if (lista.size > 1) col.addView(nav, 0)   // arriba, visible sin desplazar
         dlg.show()
+    }
+
+    // ---------- Inspecciones por árbol (paneles, tubos, niveles…) ----------
+    // Cada evento tiene, además de los tipos de singularidad, inspecciones con un árbol definido
+    // por el usuario. Se guardan en prefs "insp_<evento>" (o "tplinsp_<caldera>" en la plantilla).
+    // Carpeta: <Evento>/<Inspección>/<Nodo>/<Nodo>/…  ·  fotos "SC-P01-T05_general_1.jpg".
+
+    private fun claveInsp() = plantilla?.let { "tplinsp_$it" } ?: "insp_$evento"
+
+    private fun nodoAJson(n: Nodo): JSONObject = JSONObject().put("n", n.nombre).put("c", n.codigo)
+        .put("h", JSONArray().apply { n.hijos.forEach { put(nodoAJson(it)) } })
+
+    private fun nodoDesdeJson(o: JSONObject): Nodo {
+        val h = o.optJSONArray("h")
+        return Nodo(o.optString("n"), o.optString("c"), MutableList(h?.length() ?: 0) { nodoDesdeJson(h!!.getJSONObject(it)) })
+    }
+
+    private fun inspAJson(l: List<Insp>) = JSONArray().apply {
+        l.forEach { put(nodoAJson(it.nodo).put("niv", JSONArray().apply { it.niveles.forEach { nv -> put(nv) } })) }
+    }.toString()
+
+    private fun inspDesdeJson(s: String?): MutableList<Insp> = runCatching {
+        val a = JSONArray(s ?: "[]")
+        MutableList(a.length()) { i ->
+            val o = a.getJSONObject(i)
+            val nv = o.optJSONArray("niv")
+            Insp(nodoDesdeJson(o), MutableList(nv?.length() ?: 0) { nv!!.getString(it) })
+        }
+    }.getOrDefault(mutableListOf())
+
+    private fun guardarInsp() { prefs.edit().putString(claveInsp(), inspAJson(insps)).apply() }
+
+    private fun nodoEn(ii: Int, r: List<Int>): Nodo? {
+        var n = insps.getOrNull(ii)?.nodo ?: return null
+        for (i in r) n = n.hijos.getOrNull(i) ?: return null
+        return n
+    }
+
+    /** Nodos del camino (sin la raíz). */
+    private fun cadena(ii: Int, r: List<Int>): List<Nodo> {
+        val l = mutableListOf<Nodo>()
+        var n = insps.getOrNull(ii)?.nodo ?: return l
+        for (i in r) { n = n.hijos.getOrNull(i) ?: break; l.add(n) }
+        return l
+    }
+
+    private fun carpetaNodo(ii: Int, r: List<Int>) =
+        "$raiz/$evento/" + (listOfNotNull(insps.getOrNull(ii)?.nodo) + cadena(ii, r)).joinToString("") { it.nombre + "/" }
+
+    private fun codigoNodo(ii: Int, r: List<Int>) =
+        (listOfNotNull(insps.getOrNull(ii)?.nodo) + cadena(ii, r)).joinToString("-") { it.codigo }
+
+    /** Caminos de todos los nodos bajo [n] (sin incluirlo), en orden. */
+    private fun todosNodos(n: Nodo, base: List<Int> = emptyList()): List<List<Int>> =
+        n.hijos.flatMapIndexed { i, h -> val r = base + i; listOf(r) + todosNodos(h, r) }
+
+    /** Elementos finales (sin hijos) bajo [n]; si no tiene hijos, él mismo. */
+    private fun elementosDe(n: Nodo, base: List<Int> = emptyList()): List<Pair<List<Int>, Nodo>> =
+        if (n.hijos.isEmpty()) listOf(base to n) else n.hijos.flatMapIndexed { i, h -> elementosDe(h, base + i) }
+
+    private fun profundidad(n: Nodo): Int = if (n.hijos.isEmpty()) 0 else 1 + n.hijos.maxOf { profundidad(it) }
+
+    private fun codigoLimpio(s: String) = s.filter { it.isLetterOrDigit() || it in "+-." }.take(12).ifEmpty { "X" }
+
+    private fun sugerirCodigo(nombre: String): String {
+        val palabras = nombre.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val letras = palabras.filter { it.first().isLetter() }.joinToString("") { it.first().uppercase() }
+        return codigoLimpio(letras + nombre.filter { it.isDigit() })
+    }
+
+    private fun copiaNodo(n: Nodo): Nodo = Nodo(n.nombre, n.codigo, n.hijos.map { copiaNodo(it) }.toMutableList())
+
+    /** El nombre de la inspección es una carpeta del evento: no puede chocar con otra. */
+    private fun nombreInspLibre(nombre: String, excepto: Int = -1) =
+        tipos.none { it.nombre.equals(nombre, true) } && !nombre.equals("Notas en terreno", true) &&
+        insps.withIndex().none { (i, x) -> i != excepto && x.nodo.nombre.equals(nombre, true) }
+
+    private fun pantallaNodo() {
+        val ii = inspActual
+        val ins = insps[ii]
+        val r = nodoRuta.toList()
+        val nodo = nodoEn(ii, r) ?: return
+        val prof = r.size
+        title = nodo.nombre
+        val col = columna()
+        if (prof > 0) col.addView(texto((listOf(ins.nodo) + cadena(ii, r)).joinToString(" › ") { it.nombre }, 13f))
+
+        val conteo = contarFotos()
+        val conNota = carpetasConNota()
+        val cs = conds()
+        // Fotos y registros del propio elemento
+        val ruta = carpetaNodo(ii, r)
+        val tot = conteo[ruta]?.let { it.first + it.second } ?: 0
+        val det = listOfNotNull(if (tot == 1) "1 foto" else "$tot fotos",
+            cs.optString(ruta).takeIf { it.isNotEmpty() }?.let { textoCond(it) },
+            if (ruta in conNota) "con nota" else null).joinToString(" · ")
+        col.addView(fila("📷 Fotos y registros: ${nodo.nombre}\n$det", { menuElemento(claveNodo(ii, r)) }) {
+            if (prof == 0) menuInsp(ii) else menuNodo(ii, r)
+        })
+
+        if (prof < ins.niveles.size) {
+            val nivel = ins.niveles[prof]
+            col.addView(espacio(8))
+            col.addView(texto("$nivel (${nodo.hijos.size})", 14f, true))
+            if (nodo.hijos.isEmpty()) col.addView(texto("Aún no hay elementos. Agrega uno o una serie numerada.", 13f))
+            else if (prof + 1 == ins.niveles.size) {
+                // Último nivel: grilla como la de singularidades
+                col.addView(leyenda())
+                val grid = GridLayout(this).apply { columnCount = 4 }
+                nodo.hijos.forEachIndexed { i, h ->
+                    val rh = r + i
+                    val rr = carpetaNodo(ii, rh)
+                    val inf = conteo[rr]
+                    val total = inf?.let { it.first + it.second } ?: 0
+                    val c = cs.optString(rr)
+                    grid.addView(Button(this).apply {
+                        val sub = (if (total == 1) "1 foto" else "$total fotos") +
+                            (when (c) { "ok" -> "\nOK"; "obs" -> "\nObs."; "crit" -> "\n⚠ Crítico"; else -> "" }) +
+                            (if (rr in conNota) "\ncon nota" else "")
+                        text = android.text.SpannableString("${h.codigo}\n$sub").apply {
+                            setSpan(android.text.style.RelativeSizeSpan(0.72f), h.codigo.length + 1, length, 0)
+                        }
+                        isAllCaps = false; typeface = medio; textSize = 15f
+                        setPadding(dp(2), dp(6), dp(2), dp(6)); maxLines = 4; minWidth = 0; minimumWidth = 0
+                        stateListAnimator = null; elevation = 0f
+                        val est = estado(inf)
+                        setTextColor(if (est == 0) C.tinta else Color.WHITE)
+                        val borde = when (c) { "crit" -> C.peligro; "obs" -> C.acento; else -> null }
+                        background = when (est) {
+                            2 -> fondoRedondeado(C.ok, 12, borde, 3)
+                            1 -> fondoRedondeado(C.parcial, 12, borde, 3)
+                            else -> fondoRedondeado(C.superficie, 12, borde ?: C.borde, if (borde != null) 3 else 1)
+                        }
+                        setOnClickListener { menuElemento(claveNodo(ii, rh)) }
+                        setOnLongClickListener { menuNodo(ii, rh); true }
+                        layoutParams = GridLayout.LayoutParams().apply {
+                            width = 0; height = dp(if (c.isNotEmpty() || rr in conNota) 96 else 84)
+                            columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                            setMargins(dp(4), dp(4), dp(4), dp(4))
+                        }
+                    })
+                }
+                col.addView(grid)
+                col.addView(texto("Mantén presionado un elemento para renombrarlo, moverlo o eliminarlo.", 12f))
+            } else nodo.hijos.forEachIndexed { i, h ->
+                val rh = r + i
+                val hojas = elementosDe(h, rh)
+                val listos = hojas.count { (x, _) -> estado(conteo[carpetaNodo(ii, x)]) == 2 }
+                val criticos = (listOf(rh) + todosNodos(h, rh)).count { cs.optString(carpetaNodo(ii, it)) == "crit" }
+                val sub = ins.niveles[prof + 1]
+                col.addView(fila("${h.nombre}\n${h.hijos.size} × $sub · $listos de ${hojas.size} completos" +
+                                 (if (criticos > 0) " · ⚠ $criticos crítico(s)" else ""),
+                    { nodoRuta.add(i); render() }, listos to hojas.size) { menuNodo(ii, rh) })
+            }
+            col.addView(boton("＋ Agregar $nivel") { agregarNodos(ii, r) })
+        } else if (ins.niveles.isEmpty())
+            col.addView(texto("Esta inspección no tiene niveles. Usa ✎ → Editar niveles para armar el árbol.", 13f))
+
+        col.addView(espacio(16))
+        col.addView(boton(if (prof == 0) "← Volver al evento" else "← Volver") {
+            if (prof == 0) inspActual = -1 else nodoRuta.removeAt(nodoRuta.size - 1)
+            render()
+        })
+        col.addView(espacio(12))
+        col.addView(texto("Carpeta: $ruta", 12f))
+        setContentView(scroll(col))
+    }
+
+    private fun nuevaInspeccion() {
+        val modelos = listOf(
+            "Paneles y tubos" to listOf("Panel", "Tubo"),
+            "Por niveles" to listOf("Nivel", "Pared", "Tubo"),
+            "Solo tubos" to listOf("Tubo"))
+        menuGrande("Nueva inspección — ¿cómo se ordena?",
+            modelos.map { (n, l) -> "🌳  $n\n${l.joinToString(" › ")}" to { pedirDatosInsp(l) } } +
+            ("✏️  Definir mis niveles\nEj. Equipo › Panel › Tubo" to { pedirNiveles("") { pedirDatosInsp(it) } }))
+    }
+
+    private fun pedirNiveles(inicial: String, ok: (List<String>) -> Unit) {
+        dialogoTexto("Niveles de arriba hacia abajo, separados por coma (ej. Equipo, Panel, Tubo)", inicial) { s ->
+            val l = s.split(',', '›', '>').map { it.trim() }.filter { it.isNotEmpty() }.map { limpiar(it) }
+            if (l.size > 6) aviso("Máximo 6 niveles") else ok(l)
+        }
+    }
+
+    private fun pedirDatosInsp(niveles: List<String>) {
+        dialogoTexto("Nombre de la inspección (ej. Paneles Sobrecalentador)", "") { n0 ->
+            val nombre = limpiar(n0)
+            if (!nombreInspLibre(nombre)) { aviso("\"$nombre\" ya se usa en este evento"); return@dialogoTexto }
+            dialogoTexto("Código corto para los nombres de las fotos (ej. SC)", sugerirCodigo(nombre)) { c ->
+                insps.add(Insp(Nodo(nombre, codigoLimpio(c)), niveles.toMutableList()))
+                guardarInsp()
+                inspActual = insps.size - 1; nodoRuta.clear()
+                render()
+            }
+        }
+    }
+
+    private fun menuInsp(ii: Int) {
+        val ins = insps[ii]
+        val n = ins.nodo
+        menuGrande(n.nombre, listOf(
+            "🌳  Abrir" to { inspActual = ii; nodoRuta.clear(); render() },
+            "✏️  Renombrar" to {
+                dialogoTexto("Nuevo nombre (las fotos ya tomadas no se mueven)", n.nombre) { x ->
+                    val nombre = limpiar(x)
+                    if (!nombreInspLibre(nombre, ii)) aviso("\"$nombre\" ya se usa en este evento")
+                    else { n.nombre = nombre; guardarInsp(); render() }
+                }
+            },
+            "✏️  Cambiar código (${n.codigo})" to {
+                dialogoTexto("Nuevo código", n.codigo) { x -> n.codigo = codigoLimpio(x); guardarInsp(); render() }
+            },
+            "✏️  Editar niveles (${ins.niveles.joinToString(" › ").ifEmpty { "sin niveles" }})" to {
+                pedirNiveles(ins.niveles.joinToString(", ")) { l ->
+                    val prof = profundidad(n)
+                    if (l.size < prof) aviso("El árbol ya tiene elementos en $prof niveles: deja al menos $prof")
+                    else { ins.niveles.clear(); ins.niveles.addAll(l); guardarInsp(); render() }
+                }
+            },
+            "↑  Subir" to { insps.mover(ii, -1); if (inspActual == ii) inspActual = maxOf(0, ii - 1); guardarInsp(); render() },
+            "↓  Bajar" to { insps.mover(ii, 1); if (inspActual == ii) inspActual = minOf(insps.size - 1, ii + 1); guardarInsp(); render() },
+            "🗑  Eliminar" to {
+                confirmar("¿Eliminar la inspección \"${n.nombre}\" y su árbol? Las fotos ya tomadas no se borran.") {
+                    insps.removeAt(ii)
+                    if (inspActual == ii) { inspActual = -1; nodoRuta.clear() } else if (inspActual > ii) inspActual--
+                    guardarInsp(); render()
+                }
+            }))
+    }
+
+    private fun agregarNodos(ii: Int, r: List<Int>) {
+        val ins = insps.getOrNull(ii) ?: return
+        val nodo = nodoEn(ii, r) ?: return
+        val nivel = ins.niveles.getOrNull(r.size) ?: return
+        menuGrande("Agregar $nivel", listOf(
+            "＋  Serie numerada\nEj. $nivel 01 a $nivel 40" to { agregarSerie(ii, r, nivel) },
+            "＋  Uno con nombre propio\nEj. $nivel Norte, $nivel +12 m" to {
+                dialogoTexto("Nombre", "$nivel ") { n0 ->
+                    val nombre = limpiar(n0)
+                    if (nodo.hijos.any { it.nombre.equals(nombre, true) }) { aviso("Ya existe \"$nombre\""); return@dialogoTexto }
+                    dialogoTexto("Código corto para los nombres de las fotos", sugerirCodigo(nombre)) { c ->
+                        nodo.hijos.add(Nodo(nombre, codigoLimpio(c))); guardarInsp(); render()
+                    }
+                }
+            }))
+    }
+
+    private fun agregarSerie(ii: Int, r: List<Int>, nivel: String) {
+        val nodo = nodoEn(ii, r) ?: return
+        val ini = nivel.take(1).uppercase()
+        dialogoTexto("Prefijo del código (ej. $ini → ${ini}01, ${ini}02…)", ini) { p0 ->
+            val pref = codigoLimpio(p0)
+            dialogoTexto("Desde el número", (nodo.hijos.size + 1).toString(), true) { a ->
+                val x = a.toIntOrNull() ?: run { aviso("Número no válido"); return@dialogoTexto }
+                dialogoTexto("Hasta el número", (x + 9).toString(), true) { b ->
+                    val y = b.toIntOrNull()
+                    if (y == null || y < x || y - x >= 500) { aviso("Rango no válido (hasta 500 por vez)"); return@dialogoTexto }
+                    var n = 0
+                    for (k in x..y) {
+                        val nombre = "%s %02d".format(nivel, k)
+                        if (nodo.hijos.none { it.nombre.equals(nombre, true) }) { nodo.hijos.add(Nodo(nombre, "%s%02d".format(pref, k))); n++ }
+                    }
+                    guardarInsp()
+                    aviso(if (n == 0) "Ya existían todos" else "$n agregados")
+                    render()
+                }
+            }
+        }
+    }
+
+    private fun menuNodo(ii: Int, r: List<Int>) {
+        if (r.isEmpty()) { menuInsp(ii); return }
+        val ins = insps.getOrNull(ii) ?: return
+        val padre = nodoEn(ii, r.dropLast(1)) ?: return
+        val i = r.last()
+        val n = padre.hijos.getOrNull(i) ?: return
+        val sub = ins.niveles.getOrNull(r.size)
+        // si la pantalla actual está dentro de este nodo, se ajusta al moverlo o eliminarlo
+        val dentro = nodoRuta.size >= r.size && nodoRuta.subList(0, r.size) == r
+        fun moverA(d: Int) {
+            if (i + d !in padre.hijos.indices) return
+            padre.hijos.mover(i, d)
+            if (dentro) nodoRuta[r.size - 1] = i + d
+            guardarInsp(); render()
+        }
+        val ops = mutableListOf<Pair<String, () -> Unit>>(
+            "📷  Fotos y registros" to { menuElemento(claveNodo(ii, r)) },
+            "✏️  Renombrar" to {
+                dialogoTexto("Nuevo nombre (las fotos ya tomadas no se mueven)", n.nombre) { x ->
+                    val nombre = limpiar(x)
+                    if (padre.hijos.any { it !== n && it.nombre.equals(nombre, true) }) aviso("Ya existe \"$nombre\"")
+                    else { n.nombre = nombre; guardarInsp(); render() }
+                }
+            },
+            "✏️  Cambiar código (${n.codigo})" to {
+                dialogoTexto("Nuevo código", n.codigo) { x -> n.codigo = codigoLimpio(x); guardarInsp(); render() }
+            },
+            "↑  Subir" to { moverA(-1) },
+            "↓  Bajar" to { moverA(1) })
+        if (sub != null) ops.add("＋  Agregar $sub dentro de ${n.nombre}" to {
+            nodoRuta.clear(); nodoRuta.addAll(r); render(); agregarNodos(ii, r)
+        })
+        if (n.hijos.isNotEmpty() && padre.hijos.size > 1) ops.add("🌳  Copiar su contenido a los demás\n${n.hijos.size} × $sub a los vacíos de este nivel" to {
+            val destinos = padre.hijos.filter { it !== n && it.hijos.isEmpty() }
+            if (destinos.isEmpty()) aviso("Los demás ya tienen contenido")
+            else confirmar("¿Copiar el contenido de ${n.nombre} (${n.hijos.size} × $sub) a ${destinos.size} elemento(s) " +
+                           "vacío(s) de este nivel? Los que ya tienen contenido no cambian.") {
+                destinos.forEach { d -> n.hijos.forEach { d.hijos.add(copiaNodo(it)) } }
+                guardarInsp(); aviso("Copiado a ${destinos.size}"); render()
+            }
+        })
+        ops.add("🗑  Eliminar" to {
+            val bajo = todosNodos(n).size
+            confirmar("¿Eliminar ${n.nombre}" + (if (bajo > 0) " y los $bajo elementos que contiene" else "") +
+                      "? Las fotos ya tomadas no se borran.") {
+                padre.hijos.removeAt(i)
+                if (dentro) { while (nodoRuta.size >= r.size) nodoRuta.removeAt(nodoRuta.size - 1) }
+                guardarInsp(); render()
+            }
+        })
+        menuGrande(n.nombre, ops)
     }
 
     // ---------- Vista previa de fotos ----------
@@ -1263,10 +1695,9 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Notas ----------
 
-    private fun editarNota(ti: Int, pi: Int, n: Int) {
-        val t = tipos[ti]
-        val p = t.paredes[pi]
-        val ruta = carpeta(t, p, n)
+    private fun editarNota(clave: String) {
+        val d = destDe(clave) ?: return
+        val ruta = d.ruta
         val et = EditText(this).apply {
             setText(leerNota(ruta))
             minLines = 4
@@ -1280,11 +1711,12 @@ class MainActivity : AppCompatActivity() {
         col.addView(et)
         col.addView(boton("🎤  Dictar") { dictar() })
         AlertDialog.Builder(this)
-            .setTitle("Nota %s %02d — %s".format(t.prefijo, n, p.nombre))
+            .setTitle("Nota ${d.titulo}")
             .setView(col)
             .setPositiveButton("Guardar") { _, _ ->
                 guardarNota(ruta, et.text.toString().trim())
-                actualizarResumen(t, p)
+                val c = clave.split('/')
+                if (c[0] == "s") tipos.getOrNull(c[1].toInt())?.let { t -> t.paredes.getOrNull(c[2].toInt())?.let { actualizarResumen(t, it) } }
                 exportarNotas()
                 render()
             }
@@ -1519,7 +1951,7 @@ class MainActivity : AppCompatActivity() {
             prefs.registerOnSharedPreferenceChangeListener(alCambiarPrefs)
             migrarCalderas()
             plantilla = null; plantaActual = null; enCalderas = false; enTerreno = false
-            enEvento = false; tipoActual = -1; paredActual = -1
+            enEvento = false; tipoActual = -1; paredActual = -1; inspActual = -1; nodoRuta.clear()
             cargar()
             respaldar(false)
             aviso("Respaldo restaurado")
@@ -1572,7 +2004,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun resumenPlantilla(id: String): String {
         val l = desdeJson(prefs.getString("tpl_$id", null)) ?: return ""
-        return "${l.size} tipos · ${l.sumOf { t -> t.paredes.sumOf { it.cantidad } }} singularidades"
+        val ni = inspDesdeJson(prefs.getString("tplinsp_$id", null)).size
+        return "${l.size} tipos · ${l.sumOf { t -> t.paredes.sumOf { it.cantidad } }} singularidades" +
+               if (ni > 0) " · $ni inspección(es) por elementos" else ""
     }
 
     /** Nombre del evento → planta → caldera. Llama [luego] con el nombre del evento. */
@@ -1585,6 +2019,7 @@ class MainActivity : AppCompatActivity() {
                         ?: prefs.getString("tipos", null) ?: aJson(porDefecto())
                     val ed = prefs.edit().putString("tipos_$nombre", json)
                     if (id != null) ed.putString("caldera_$nombre", id)
+                    id?.let { prefs.getString("tplinsp_$it", null) }?.let { ed.putString("insp_$nombre", it) }
                     ed.apply()
                 }
                 luego(nombre)
@@ -1649,6 +2084,7 @@ class MainActivity : AppCompatActivity() {
                             if (plantaDe(id) != pl) id else {
                                 val nid = idCaldera(n, calderaDe(id))
                                 ed.putString("tpl_$nid", prefs.getString("tpl_$id", null)).remove("tpl_$id")
+                                prefs.getString("tplinsp_$id", null)?.let { ed.putString("tplinsp_$nid", it).remove("tplinsp_$id") }
                                 nid
                             }
                         }
@@ -1660,7 +2096,7 @@ class MainActivity : AppCompatActivity() {
                     2 -> confirmar("¿Eliminar la planta \"$pl\" y sus ${calderasDe(pl).size} caldera(s)? " +
                                    "Los eventos ya creados no cambian.") {
                         val ed = prefs.edit()
-                        calderasDe(pl).forEach { ed.remove("tpl_$it") }
+                        calderasDe(pl).forEach { ed.remove("tpl_$it").remove("tplinsp_$it") }
                         ed.apply()
                         guardarListaPrefs("calderas", calderas().filter { plantaDe(it) != pl })
                         guardarListaPrefs("plantas", plantas().filter { it != pl })
@@ -1703,19 +2139,23 @@ class MainActivity : AppCompatActivity() {
                         val nid = idCaldera(pl, limpiar(n0))
                         if (nid == id) return@dialogoTexto
                         if (nid in calderas()) { aviso("Ya existe esa caldera"); return@dialogoTexto }
-                        prefs.edit().putString("tpl_$nid", prefs.getString("tpl_$id", null)).remove("tpl_$id").apply()
+                        val ed = prefs.edit().putString("tpl_$nid", prefs.getString("tpl_$id", null)).remove("tpl_$id")
+                        prefs.getString("tplinsp_$id", null)?.let { ed.putString("tplinsp_$nid", it).remove("tplinsp_$id") }
+                        ed.apply()
                         guardarListaPrefs("calderas", calderas().map { if (it == id) nid else it })
                         render()
                     }
                     2 -> dialogoTexto("Nombre de la copia", "${calderaDe(id)} (copia)") { n0 ->
                         val nid = idCaldera(pl, limpiar(n0))
                         if (nid in calderas()) { aviso("Ya existe esa caldera"); return@dialogoTexto }
-                        prefs.edit().putString("tpl_$nid", prefs.getString("tpl_$id", null)).apply()
+                        val ed = prefs.edit().putString("tpl_$nid", prefs.getString("tpl_$id", null))
+                        prefs.getString("tplinsp_$id", null)?.let { ed.putString("tplinsp_$nid", it) }
+                        ed.apply()
                         guardarListaPrefs("calderas", calderas() + nid)
                         render()
                     }
                     3 -> confirmar("¿Eliminar la caldera \"${calderaDe(id)}\"? Los eventos ya creados no cambian.") {
-                        prefs.edit().remove("tpl_$id").apply()
+                        prefs.edit().remove("tpl_$id").remove("tplinsp_$id").apply()
                         guardarListaPrefs("calderas", calderas().filter { it != id })
                         render()
                     }
@@ -1725,12 +2165,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun abrirPlantilla(id: String) {
         plantilla = id; enCalderas = true; plantaActual = plantaDe(id)
-        tipoActual = -1; paredActual = -1
+        tipoActual = -1; paredActual = -1; inspActual = -1; nodoRuta.clear()
         cargar(); render()
     }
 
     private fun cerrarPlantilla() {
-        plantilla = null; tipoActual = -1; paredActual = -1
+        plantilla = null; tipoActual = -1; paredActual = -1; inspActual = -1; nodoRuta.clear()
         cargar(); render()
     }
 
@@ -1768,7 +2208,8 @@ class MainActivity : AppCompatActivity() {
     private fun guardarComoPlantilla() {
         val previo = prefs.getString("caldera_$evento", null)
         mostrar(AlertDialog.Builder(this).setTitle("Guardar como plantilla de caldera")
-            .setMessage("Guarda los tipos de singularidad, sus paredes y cantidades de este evento para " +
+            .setMessage("Guarda los tipos de singularidad (paredes y cantidades) y las inspecciones por elementos " +
+                        "(su árbol de paneles, tubos o niveles) de este evento para " +
                         "precargarlos en los próximos eventos de esa caldera.\n\nNo cambia fotos, notas ni mediciones.")
             .setPositiveButton("Continuar") { _, _ -> pedirPlantilla(previo) }
             .setNegativeButton("Cancelar", null).create())
@@ -1780,7 +2221,9 @@ class MainActivity : AppCompatActivity() {
             dialogoTexto("Caldera (ej. Caldera Recuperadora)", previo?.let { calderaDe(it) } ?: "") { c0 ->
                 val id = idCaldera(pl, limpiar(c0))
                 val hacer = {
-                    prefs.edit().putString("tpl_$id", aJson(tipos)).putString("caldera_$evento", id).apply()
+                    val ed = prefs.edit().putString("tpl_$id", aJson(tipos)).putString("caldera_$evento", id)
+                    if (insps.isEmpty()) ed.remove("tplinsp_$id") else ed.putString("tplinsp_$id", inspAJson(insps))
+                    ed.apply()
                     guardarListaPrefs("plantas", plantas() + pl)
                     guardarListaPrefs("calderas", calderas() + id)
                     aviso("Plantilla guardada: ${plantaDe(id)} — ${calderaDe(id)}")
@@ -2014,18 +2457,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** "Notas <evento>.csv" en la carpeta del evento (se abre en Excel). Devuelve nº de notas. */
+    /** Notas de las inspecciones por árbol: (inspección, grupo, elemento, texto). */
+    private fun notasArbol(): List<List<String>> {
+        val conNota = carpetasConNota()
+        val res = mutableListOf<List<String>>()
+        insps.forEachIndexed { ii, ins ->
+            for (r in listOf(emptyList<Int>()) + todosNodos(ins.nodo)) {
+                val d = destDe(claveNodo(ii, r)) ?: continue
+                if (d.ruta !in conNota) continue
+                val txt = leerNota(d.ruta)
+                val nombre = nodoEn(ii, r)?.nombre ?: continue
+                if (txt.isNotBlank()) res.add(listOf(ins.nodo.nombre, if (r.size <= 1) "" else d.grupo, nombre, txt))
+            }
+        }
+        return res
+    }
+
     private fun exportarNotas(): Int {
         val lista = todasLasNotas()
+        val arbol = notasArbol()
         val nombre = "Notas $evento.csv"
-        if (lista.isEmpty()) { escribirTexto("$raiz/$evento/", nombre, ""); return 0 }
+        if (lista.isEmpty() && arbol.isEmpty()) { escribirTexto("$raiz/$evento/", nombre, ""); return 0 }
         val sb = StringBuilder("﻿Tipo;Pared;Singularidad;Nota\n")
         for (nI in lista) {
             val nota = nI.texto.replace("\"", "\"\"").replace("\n", " ")
             val sing = "%s %02d".format(nI.prefijo, nI.num)
             sb.append("${nI.tipo};${nI.pared};$sing;\"$nota\"\n")
         }
+        for ((ins, grupo, elem, txt) in arbol) {
+            sb.append("$ins;$grupo;$elem;\"${txt.replace("\"", "\"\"").replace("\n", " ")}\"\n")
+        }
         escribirTexto("$raiz/$evento/", nombre, sb.toString().trimEnd())
-        return lista.size
+        return lista.size + arbol.size
     }
 
     // ---------- Exportar Excel .xlsx ----------
@@ -2178,47 +2641,84 @@ class MainActivity : AppCompatActivity() {
         }
         val meds = mediciones().filter { it.optString("origen") == "sing" }.groupBy { it.optString("ruta") }
         val conNota = carpetasConNota()
+        val cs = conds()
+
+        /** Datos de un elemento (singularidad o elemento del árbol) para su fila del Excel. */
+        class DatosFila(val est: Int, val gen: Int, val det: Int, val marc: Int, val nota: String, val cond: String,
+                        val textoEsp: String, val min: Double?, val textoRA: String)
+        fun datos(ruta: String): DatosFila {
+            val nombres = archivos[ruta].orEmpty()
+            val gen = nombres.count { it.contains("_general") && !it.contains("_marcada") }
+            val det = nombres.count { it.contains("_detalle") && !it.contains("_marcada") }
+            val marc = nombres.count { it.contains("_marcada") }
+            // igual que contarFotos(): todo lo que no es general cuenta como detalle
+            val info = gen to nombres.count { !it.contains("_marcada") && !it.contains("_general") }
+            val nota = if (ruta in conNota) leerNota(ruta) else ""
+            val lista = meds[ruta].orEmpty()
+            val valores = lista.filter { !esRA(it) }.flatMap { puntosDe(it) }.mapNotNull { numero(it.valor) }
+            val textoEsp = lista.filter { !esRA(it) }.joinToString("\n") { m ->
+                puntosDe(m).mapIndexed { i, pt -> "P${i + 1} ${textoValor(pt.valor)}" }.joinToString(" · ")
+            }
+            val textoRA = lista.filter { esRA(it) }.joinToString("\n") {
+                "${it.optString("modo")}: ${it.optString("resumen").replace("\n", " · ")}"
+            }
+            return DatosFila(estado(info), gen, det, marc, nota, cs.optString(ruta), textoEsp, valores.minOrNull(), textoRA)
+        }
+        fun textoEstado(e: Int) = when (e) { 2 -> "Completa"; 1 -> "Incompleta"; else -> "Sin fotos" }
+        fun condCelda(c: String) = if (c.isEmpty()) null else textoCond(c)
+
         val x = Xlsx()
         val resumen = x.hoja("Resumen",
             listOf("Tipo", "Pared", "Singularidades", "Completas", "Incompletas", "Sin fotos", "Con nota", "Espesor mín. (mm)"),
             listOf(24, 20, 14, 12, 12, 11, 11, 16))
         for (t in tipos) {
             val h = x.hoja(t.nombre,
-                listOf("Pared", "Singularidad", "Estado", "Generales", "Detalles", "Marcadas", "Nota",
+                listOf("Pared", "Singularidad", "Estado", "Condición", "Generales", "Detalles", "Marcadas", "Nota",
                        "Espesores (mm)", "Espesor mín. (mm)", "Mediciones RA"),
-                listOf(18, 13, 12, 11, 10, 10, 45, 40, 16, 40))
+                listOf(18, 13, 12, 13, 11, 10, 10, 45, 40, 16, 40))
             for (p in t.paredes) {
                 var completas = 0; var incompletas = 0; var sinFotos = 0; var notas = 0
                 var minPared: Double? = null
                 for (n in 1..p.cantidad) {
-                    val ruta = carpeta(t, p, n)
-                    val nombres = archivos[ruta].orEmpty()
-                    val gen = nombres.count { it.contains("_general") && !it.contains("_marcada") }
-                    val det = nombres.count { it.contains("_detalle") && !it.contains("_marcada") }
-                    val marc = nombres.count { it.contains("_marcada") }
-                    // igual que contarFotos(): todo lo que no es general cuenta como detalle
-                    val info = gen to nombres.count { !it.contains("_marcada") && !it.contains("_general") }
-                    val est = estado(info)
-                    when (est) { 2 -> completas++; 1 -> incompletas++; else -> sinFotos++ }
-                    val nota = if (ruta in conNota) leerNota(ruta) else ""
-                    if (nota.isNotBlank()) notas++
-                    val lista = meds[ruta].orEmpty()
-                    val esp = lista.filter { !esRA(it) }.flatMap { puntosDe(it) }
-                    val valores = esp.mapNotNull { numero(it.valor) }
-                    val min = valores.minOrNull()
-                    if (min != null) minPared = minOf(minPared ?: min, min)
-                    val textoEsp = lista.filter { !esRA(it) }.joinToString("\n") { m ->
-                        puntosDe(m).mapIndexed { i, pt -> "P${i + 1} ${textoValor(pt.valor)}" }.joinToString(" · ")
-                    }
-                    val textoRA = lista.filter { esRA(it) }.joinToString("\n") {
-                        "${it.optString("modo")}: ${it.optString("resumen").replace("\n", " · ")}"
-                    }
-                    h.fila(p.nombre, "%s %02d".format(t.prefijo, n),
-                        when (est) { 2 -> "Completa"; 1 -> "Incompleta"; else -> "Sin fotos" },
-                        gen, det, if (marc > 0) marc else null, nota.ifBlank { null },
-                        textoEsp.ifBlank { null }, min, textoRA.ifBlank { null })
+                    val f = datos(carpeta(t, p, n))
+                    when (f.est) { 2 -> completas++; 1 -> incompletas++; else -> sinFotos++ }
+                    if (f.nota.isNotBlank()) notas++
+                    f.min?.let { minPared = minOf(minPared ?: it, it) }
+                    h.fila(p.nombre, "%s %02d".format(t.prefijo, n), textoEstado(f.est), condCelda(f.cond),
+                        f.gen, f.det, if (f.marc > 0) f.marc else null, f.nota.ifBlank { null },
+                        f.textoEsp.ifBlank { null }, f.min, f.textoRA.ifBlank { null })
                 }
                 resumen.fila(t.nombre, p.nombre, p.cantidad, completas, incompletas, sinFotos, notas, minPared)
+            }
+        }
+        // Inspecciones por árbol: una hoja cada una con todos sus elementos; en Resumen, una fila
+        // por cada elemento del primer nivel (o la inspección completa si no tiene niveles).
+        insps.forEachIndexed { ii, ins ->
+            val h = x.hoja(ins.nodo.nombre,
+                listOf("Ubicación", "Nivel", "Código", "Estado", "Condición", "Generales", "Detalles", "Marcadas", "Nota",
+                       "Espesores (mm)", "Espesor mín. (mm)", "Mediciones RA"),
+                listOf(34, 12, 16, 12, 13, 11, 10, 10, 45, 40, 16, 40))
+            for (r in listOf(emptyList<Int>()) + todosNodos(ins.nodo)) {
+                val d = destDe(claveNodo(ii, r)) ?: continue
+                val f = datos(d.ruta)
+                val nodo = nodoEn(ii, r) ?: continue
+                // la raíz solo aparece si tiene algo registrado
+                if (r.isEmpty() && nodo.hijos.isNotEmpty() && f.gen + f.det + f.marc == 0 && f.nota.isBlank() &&
+                    f.cond.isEmpty() && f.textoEsp.isBlank() && f.textoRA.isBlank()) continue
+                val ubic = if (r.isEmpty()) ins.nodo.nombre else cadena(ii, r).joinToString(" › ") { it.nombre }
+                val nivel = if (r.isEmpty()) "Inspección" else ins.niveles.getOrElse(r.size - 1) { "" }
+                h.fila(ubic, nivel, d.codigo, textoEstado(f.est), condCelda(f.cond), f.gen, f.det,
+                    if (f.marc > 0) f.marc else null, f.nota.ifBlank { null }, f.textoEsp.ifBlank { null }, f.min,
+                    f.textoRA.ifBlank { null })
+            }
+            val grupos = if (ins.nodo.hijos.isEmpty()) listOf(emptyList<Int>() to ins.nodo)
+                         else ins.nodo.hijos.mapIndexed { i, n -> listOf(i) to n }
+            for ((rg, ng) in grupos) {
+                val todos = (listOf(rg) + todosNodos(ng, rg)).map { datos(carpetaNodo(ii, it)) }
+                val hojas = elementosDe(ng, rg).map { datos(carpetaNodo(ii, it.first)) }
+                resumen.fila(ins.nodo.nombre, if (rg.isEmpty()) "—" else ng.nombre, hojas.size,
+                    hojas.count { it.est == 2 }, hojas.count { it.est == 1 }, hojas.count { it.est == 0 },
+                    todos.count { it.nota.isNotBlank() }, todos.mapNotNull { it.min }.minOrNull())
             }
         }
         val regs = registros()
@@ -2323,7 +2823,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun lanzarCamara(uri: Uri, modo: String) {
         prefs.edit().putString("pendUri", uri.toString()).putString("pendModo", modo)
-            .putInt("pendTipo", -1).putInt("pendPared", -1).putInt("pendNum", -1).apply()
+            .remove("pendClave").apply()
         val fallar = {
             runCatching { contentResolver.delete(uri, null, null) }
             if (modo == "medBase") { val s = sesionMed(); guardarSesionMed(null); volverDeMedicion(s) }
@@ -2342,9 +2842,9 @@ class MainActivity : AppCompatActivity() {
             "Medicion_%02d".format(k), "$evento — Medición %02d".format(k))
     }
 
-    private fun medirConRA(origen: String, ruta: String, base: String, titulo: String, ti: Int = -1, pi: Int = -1, n: Int = -1) {
+    private fun medirConRA(origen: String, ruta: String, base: String, titulo: String, clave: String = "") {
         val d = JSONObject().put("origen", origen).put("ruta", ruta).put("extra", ruta).put("base", base)
-            .put("titulo", titulo).put("ti", ti).put("pi", pi).put("n", n)
+            .put("titulo", titulo).put("clave", clave)
         prefs.edit().putString("pendRA", d.toString()).apply()
         medirRA.launch(Intent(this, MedirRAActivity::class.java)
             .putExtra("ruta", ruta).putExtra("nombre", "$base.jpg").putExtra("titulo", titulo))
@@ -2357,29 +2857,26 @@ class MainActivity : AppCompatActivity() {
         medirConRA("terreno", carpetaTerreno, "RA_%02d".format(k), "$evento — Medición RA %02d".format(k))
     }
 
-    private fun medirRASingularidad(ti: Int, pi: Int, n: Int) {
-        val t = tipos[ti]; val p = t.paredes[pi]
-        val ruta = carpeta(t, p, n)
-        val pre = "%s%02d_RA_".format(t.prefijo, n)
-        val k = libre(ruta, "$pre%d.jpg")
-        medirConRA("sing", ruta, "$pre$k", "$evento — %s %02d — %s".format(t.prefijo, n, p.nombre), ti, pi, n)
+    private fun medirRAEn(clave: String) {
+        val d = destDe(clave) ?: return
+        val pre = "${d.codigo}_RA_"
+        val k = libre(d.ruta, "$pre%d.jpg")
+        medirConRA("sing", d.ruta, "$pre$k", "$evento — ${d.titulo}", clave)
     }
 
-    private fun medicionSingularidad(ti: Int, pi: Int, n: Int) {
-        val t = tipos[ti]; val p = t.paredes[pi]
-        val ruta = carpeta(t, p, n)
-        val pre = "%s%02d_espesores_".format(t.prefijo, n)
-        val k = libre(ruta, "$pre%d.jpg")
-        iniciarMedicion("sing", ruta, ruta + "Espesores/", "$pre$k",
-            "$evento — %s %02d — %s".format(t.prefijo, n, p.nombre), ti, pi, n)
+    private fun medicionEn(clave: String) {
+        val d = destDe(clave) ?: return
+        val pre = "${d.codigo}_espesores_"
+        val k = libre(d.ruta, "$pre%d.jpg")
+        iniciarMedicion("sing", d.ruta, d.ruta + "Espesores/", "$pre$k", "$evento — ${d.titulo}", clave)
     }
 
     private fun iniciarMedicion(origen: String, ruta: String, extra: String, base: String, titulo: String,
-                                ti: Int = -1, pi: Int = -1, n: Int = -1) {
+                                clave: String = "") {
         val uri = crearImagen(extra, "${base}_original.jpg") ?: run { aviso("No se pudo crear el archivo"); return }
         val s = JSONObject().put("origen", origen).put("ruta", ruta).put("extra", extra)
             .put("base", base).put("titulo", titulo).put("foto", uri.toString())
-            .put("fecha", System.currentTimeMillis()).put("ti", ti).put("pi", pi).put("n", n)
+            .put("fecha", System.currentTimeMillis()).put("clave", clave)
             .put("puntos", JSONArray())
         guardarSesionMed(s)
         aviso("1. Toma una foto de la zona medida")
@@ -2401,8 +2898,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun volverDeMedicion(s: JSONObject?) {
         if (s?.optString("origen") == "terreno") enTerreno = true
-        else if (s != null && s.optInt("ti") >= 0) {
-            enEvento = true; tipoActual = s.optInt("ti"); paredActual = s.optInt("pi")
+        else if (s != null) {
+            val c = s.optString("clave").ifEmpty {
+                // mediciones de versiones anteriores (sin clave)
+                if (s.optInt("ti", -1) >= 0) claveSing(s.optInt("ti"), s.optInt("pi"), s.optInt("n")) else ""
+            }
+            if (c.isNotEmpty()) irA(c)
         }
         render()
     }
@@ -3039,21 +3540,13 @@ class MainActivity : AppCompatActivity() {
      * Abre la cámara BoilerImage en la singularidad indicada. Recibe la lista de todas las
      * singularidades del tipo (todas sus paredes) para poder saltar a la siguiente desde la cámara.
      */
-    private fun abrirCamaraPropia(ti: Int, pi: Int, n: Int, modo: String) {
-        val t = tipos[ti]
-        val rutas = ArrayList<String>(); val codigos = ArrayList<String>(); val titulos = ArrayList<String>()
-        val paredDe = ArrayList<Int>()
-        var indice = 0
-        t.paredes.forEachIndexed { j, p ->
-            for (k in 1..p.cantidad) {
-                if (j == pi && k == n) indice = rutas.size
-                rutas.add(carpeta(t, p, k)); codigos.add("%s%02d".format(t.prefijo, k))
-                titulos.add("%s%02d · %s".format(t.prefijo, k, p.nombre)); paredDe.add(j)
-            }
-        }
-        prefs.edit().putInt("camTipo", ti).putString("camParedes", paredDe.joinToString(","))
-            .putString("camNums", t.paredes.flatMap { p -> (1..p.cantidad).toList() }.joinToString(","))
-            .putString("camModo", modo).apply()
+    private fun abrirCamaraPropia(clave: String, modo: String) {
+        val lista = vecinos(clave).mapNotNull { destDe(it) }
+        val indice = lista.indexOfFirst { it.clave == clave }.coerceAtLeast(0)
+        val rutas = ArrayList(lista.map { it.ruta })
+        val codigos = ArrayList(lista.map { it.codigo })
+        val titulos = ArrayList(lista.map { "${it.codigo} · ${it.grupo}" })
+        prefs.edit().putString("camClaves", lista.joinToString("\n") { it.clave }).putString("camModo", modo).apply()
         conCamara {
             camaraBI.launch(Intent(this, CamaraActivity::class.java)
                 .putStringArrayListExtra("rutas", rutas).putStringArrayListExtra("codigos", codigos)
@@ -3062,37 +3555,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val camaraBI = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        val ti = prefs.getInt("camTipo", -1)
-        val paredes = prefs.getString("camParedes", "")!!.split(',').mapNotNull { it.toIntOrNull() }
-        val nums = prefs.getString("camNums", "")!!.split(',').mapNotNull { it.toIntOrNull() }
+        val claves = prefs.getString("camClaves", "")!!.split('\n').filter { it.isNotEmpty() }
         val modo = prefs.getString("camModo", "general") ?: "general"
         val i = res.data?.getIntExtra("indice", -1) ?: -1
-        if (ti >= 0) {
-            enEvento = true; tipoActual = ti
-            paredes.getOrNull(i)?.let { paredActual = it }
-        }
+        val clave = claves.getOrNull(i) ?: claves.firstOrNull()
+        clave?.let { irA(it) }
         render()
         val error = res.data?.getStringExtra("error")
-        if (res.resultCode != RESULT_OK && error != null && ti in tipos.indices) {
+        if (res.resultCode != RESULT_OK && error != null && clave != null && destDe(clave) != null) {
             // La cámara propia no abrió: se usa la del teléfono
             aviso("No se pudo abrir la cámara BoilerImage ($error). Se usa la del teléfono.")
-            val pi = paredes.getOrNull(i) ?: return@registerForActivityResult
-            val n = nums.getOrNull(i) ?: return@registerForActivityResult
-            tomarFotoSistema(ti, pi, n, modo)
+            tomarFotoSistema(clave, modo)
         }
     }
 
-    private fun tomarFoto(ti: Int, pi: Int, n: Int, modo: String) {
-        if (ti !in tipos.indices || pi !in tipos[ti].paredes.indices) return
-        if (camaraPropia()) abrirCamaraPropia(ti, pi, n, modo) else tomarFotoSistema(ti, pi, n, modo)
+    private fun tomarFoto(clave: String, modo: String) {
+        if (destDe(clave) == null) return
+        if (camaraPropia()) abrirCamaraPropia(clave, modo) else tomarFotoSistema(clave, modo)
     }
 
-    private fun tomarFotoSistema(ti: Int, pi: Int, n: Int, modo: String) {
-        if (ti !in tipos.indices || pi !in tipos[ti].paredes.indices) return
-        val t = tipos[ti]
-        val p = t.paredes[pi]
-        val ruta = carpeta(t, p, n)
-        val pre = "%s%02d_%s_".format(t.prefijo, n, modo)
+    private fun tomarFotoSistema(clave: String, modo: String) {
+        val d = destDe(clave) ?: return
+        val ruta = d.ruta
+        val pre = "${d.codigo}_${modo}_"
         val nombre = "$pre${libre(ruta, "$pre%d.jpg")}.jpg"
 
         val valores = ContentValues().apply {
@@ -3106,9 +3591,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit()
             .putString("pendUri", uri.toString())
             .putString("pendModo", modo)
-            .putInt("pendTipo", ti)
-            .putInt("pendPared", pi)
-            .putInt("pendNum", n)
+            .putString("pendClave", clave)
             .apply()
         conCamara(siNo = { runCatching { contentResolver.delete(uri, null, null) } }) {
             try {
@@ -3248,7 +3731,8 @@ class MainActivity : AppCompatActivity() {
         "✋" to R.drawable.ic_mover, "🗑" to R.drawable.ic_borrar, "🖼" to R.drawable.ic_imagen,
         "⌨️" to R.drawable.ic_teclado, "⌨" to R.drawable.ic_teclado, "←" to R.drawable.ic_volver,
         "＋" to R.drawable.ic_agregar, "✕" to R.drawable.ic_cerrar, "✓" to R.drawable.ic_listo,
-        "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento, "📐" to R.drawable.ic_regla, "📦" to R.drawable.ic_zip)
+        "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento, "📐" to R.drawable.ic_regla, "📦" to R.drawable.ic_zip,
+        "🌳" to R.drawable.ic_arbol, "🚦" to R.drawable.ic_estado)
 
     /** Separa un emoji inicial del texto: (ícono, texto limpio). */
     private fun separarIcono(s: String): Pair<Int?, String> {
