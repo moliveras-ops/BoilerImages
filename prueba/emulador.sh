@@ -98,7 +98,7 @@ adb shell input keyevent KEYCODE_BACK; sleep 2
 largo "t03"; cap menu_largo_t03; adb shell input keyevent KEYCODE_BACK; sleep 1
 
 # --- Volver a la raíz: carpeta con nombre leído desde imagen ---
-tap "=← Volver"; sleep 2; cap raiz_paneles
+tap "=Volver"; sleep 2; cap raiz_paneles
 abajo; tap "agregar carpeta con nombre"; sleep 1; cap pedir_nombre
 tap "imagen de la galería"; sleep 4; cap selector
 dump; grep -o 'content-desc="[^"]*"' $OUT/ui.xml | sort -u > $OUT/selector_desc.txt
@@ -106,14 +106,14 @@ tap "list view"; sleep 2; cap selector_lista
 tap "placa"; sleep 8; cap ocr_resultado
 # si quedó en el visor de imágenes del sistema, volver
 b=$(buscar "lens"); [ -n "$b" ] && { adb shell input keyevent KEYCODE_BACK; sleep 2; adb shell input keyevent KEYCODE_BACK; sleep 2; }
-b=$(buscar "=PANEL 12"); [ -z "$b" ] && b=$(buscar "panel 12"); echo "ocr -> $b"; [ -n "$b" ] && adb shell input tap $b; sleep 2; cap ocr_revisar; tap "=Guardar"; sleep 2; cap codigo_sugerido; tap "=Guardar"; sleep 2
+b=$(buscar "=PANEL 12"); [ -z "$b" ] && b=$(buscar "panel 1"); echo "ocr -> $b"; [ -n "$b" ] && adb shell input tap $b; sleep 2; cap ocr_revisar; tap "=Guardar"; sleep 2; cap codigo_sugerido; tap "=Guardar"; sleep 2
 cap raiz_con_panel12
 
 # --- Copiar los tubos de P01 a los demás paneles ---
 largo "p01"; cap menu_p01_copiar
 tap "copiar sus subcarpetas"; sleep 1; cap confirmar_copia; tap "=Sí"; sleep 2; cap paneles_copiados
 largo "p02"; tap "abrir carpeta"; sleep 2; cap panel02
-tap "=← Volver"; sleep 2
+tap "=Volver"; sleep 2
 
 # --- Exportaciones ---
 abajo; abajo; cap raiz_final
