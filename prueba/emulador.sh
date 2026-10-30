@@ -101,7 +101,11 @@ largo "t03"; cap menu_largo_t03; adb shell input keyevent KEYCODE_BACK; sleep 1
 tap "=← Volver"; sleep 2; cap raiz_paneles
 abajo; tap "agregar carpeta con nombre"; sleep 1; cap pedir_nombre
 tap "imagen de la galería"; sleep 4; cap selector
+dump; grep -o 'content-desc="[^"]*"' $OUT/ui.xml | sort -u > $OUT/selector_desc.txt
+tap "list view"; sleep 2; cap selector_lista
 tap "placa"; sleep 8; cap ocr_resultado
+# si quedó en el visor de imágenes del sistema, volver
+b=$(buscar "lens"); [ -n "$b" ] && { adb shell input keyevent KEYCODE_BACK; sleep 2; adb shell input keyevent KEYCODE_BACK; sleep 2; }
 b=$(buscar "=PANEL 12"); [ -z "$b" ] && b=$(buscar "panel 12"); echo "ocr -> $b"; [ -n "$b" ] && adb shell input tap $b; sleep 2; cap ocr_revisar; tap "=Guardar"; sleep 2; cap codigo_sugerido; tap "=Guardar"; sleep 2
 cap raiz_con_panel12
 
