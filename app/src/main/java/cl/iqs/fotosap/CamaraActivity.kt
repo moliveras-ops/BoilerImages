@@ -89,6 +89,7 @@ class CamaraActivity : AppCompatActivity() {
     private var extensiones: ExtensionsManager? = null
     private var camara: Camera? = null
     private var captura: ImageCapture? = null
+    private var vistaPrevia: Preview? = null
     private var ocupado = false
     private var linterna = false
     private var extActual = ExtensionMode.NONE
@@ -340,7 +341,8 @@ class CamaraActivity : AppCompatActivity() {
         vista.setOnTouchListener { v, e ->
             escala.onTouchEvent(e)
             if (e.action == MotionEvent.ACTION_UP && !escala.isInProgress && e.eventTime - e.downTime < 300) {
-                enfocar(e.x, e.y); v.performClick()
+                if (areaFoto().contains(e.x, e.y)) enfocar(e.x, e.y)
+                v.performClick()
             }
             true
         }
@@ -477,6 +479,7 @@ class CamaraActivity : AppCompatActivity() {
         try {
             p.unbindAll()
             camara = p.bindToLifecycle(this, sel, preview, cap)
+            vistaPrevia = preview
             captura = cap
         } catch (e: Exception) {
             if (extActual != ExtensionMode.NONE || maxima) {
@@ -525,13 +528,29 @@ class CamaraActivity : AppCompatActivity() {
         }
     }
 
+    /** Rectángulo de la vista donde realmente se ve la foto (FIT_CENTER deja franjas negras). */
+    private fun areaFoto(): android.graphics.RectF {
+        val w = vista.width.toFloat(); val h = vista.height.toFloat()
+        val r = vistaPrevia?.resolutionInfo?.resolution
+        // la pantalla está fija en vertical: el lado largo del sensor va en altura
+        val prop = if (r != null) maxOf(r.width, r.height).toFloat() / minOf(r.width, r.height) else 4f / 3f
+        var iw = w; var ih = w * prop
+        if (ih > h) { ih = h; iw = h / prop }
+        val x0 = (w - iw) / 2; val y0 = (h - ih) / 2
+        return android.graphics.RectF(x0, y0, x0 + iw, y0 + ih)
+    }
+
     private fun enfocar(x: Float, y: Float) {
         val c = camara ?: return
         val punto = vista.meteringPointFactory.createPoint(x, y)
         val accion = FocusMeteringAction.Builder(punto, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
             .setAutoCancelDuration(5, TimeUnit.SECONDS).build()
         runCatching { c.cameraControl.startFocusAndMetering(accion) }
-        anilloFoco.translationX = x - dp(42); anilloFoco.translationY = y - dp(42)
+        // el anillo queda completo dentro de la foto aunque se toque cerca del borde
+        val a = areaFoto(); val r = dp(42).toFloat()
+        val cx = if (a.width() > 2 * r) x.coerceIn(a.left + r, a.right - r) else a.centerX()
+        val cy = if (a.height() > 2 * r) y.coerceIn(a.top + r, a.bottom - r) else a.centerY()
+        anilloFoco.translationX = cx - r; anilloFoco.translationY = cy - r
         anilloFoco.animate().cancel()
         anilloFoco.alpha = 1f; anilloFoco.scaleX = 1.3f; anilloFoco.scaleY = 1.3f
         anilloFoco.animate().scaleX(1f).scaleY(1f).setDuration(200).withEndAction {
