@@ -499,6 +499,7 @@ class MainActivity : AppCompatActivity() {
         }
         col.addView(espacio(12))
         col.addView(boton("💾  Guardar como plantilla de caldera") { guardarComoPlantilla() })
+        col.addView(boton("📝  Resumen de notas (${notasCompiladas().size})") { verResumenNotas() })
         col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
         col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
         col.addView(espacio(16))
@@ -1136,6 +1137,7 @@ class MainActivity : AppCompatActivity() {
 
         col.addView(espacio(16))
         if (prof == 0 && elem) {
+            col.addView(boton("📝  Resumen de notas (${notasCompiladas().size})") { verResumenNotas() })
             col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
             col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
         }
@@ -2714,7 +2716,126 @@ class MainActivity : AppCompatActivity() {
         return res
     }
 
+    // ---------- Resumen de notas compilado (todo el evento, agrupado por componente) ----------
+
+    /** Nota de un componente: grupo (tipo o carpeta principal), ubicación, código, condición, texto. */
+    private class NotaComp(val grupo: String, val ubic: String, val cod: String, val cond: String,
+                           val texto: String, val clave: String?)
+
+    private fun notasCompiladas(): List<NotaComp> {
+        val conNota = carpetasConNota()
+        val cs = conds()
+        val res = mutableListOf<NotaComp>()
+        tipos.forEachIndexed { ti, t ->
+            t.paredes.forEachIndexed { pi, p ->
+                for (n in 1..p.cantidad) {
+                    val ruta = carpeta(t, p, n)
+                    val txt = if (ruta in conNota) leerNota(ruta) else ""
+                    val c = cs.optString(ruta)
+                    if (txt.isNotBlank() || c == "crit" || c == "obs")
+                        res.add(NotaComp(t.nombre, p.nombre, "%s%02d".format(t.prefijo, n), c, txt, "s/$ti/$pi/$n"))
+                }
+            }
+        }
+        insps.forEachIndexed { ii, ins ->
+            for (r in listOf(emptyList<Int>()) + todosNodos(ins.nodo)) {
+                val clave = claveNodo(ii, r)
+                val d = destDe(clave) ?: continue
+                val txt = if (d.ruta in conNota) leerNota(d.ruta) else ""
+                val c = cs.optString(d.ruta)
+                if (txt.isBlank() && c != "crit" && c != "obs") continue
+                val cad = cadena(ii, r)
+                val grupo = if (esElementos()) cad.firstOrNull()?.nombre ?: "Carpeta principal" else ins.nodo.nombre
+                val ubic = if (cad.isEmpty()) "(carpeta principal)" else cad.joinToString(" › ") { it.nombre }
+                res.add(NotaComp(grupo, ubic, d.codigo, c, txt, clave))
+            }
+        }
+        for (rg in registros().sortedBy { it.num }) {
+            if (rg.nota.isBlank()) continue
+            res.add(NotaComp("Notas en terreno", "Registro %02d".format(rg.num) +
+                (if (rg.valor.isNotBlank()) " · ${textoValor(rg.valor)}" else ""), "R%02d".format(rg.num), "", rg.nota, null))
+        }
+        return res
+    }
+
+    private fun lineaNota(n: NotaComp): String {
+        val cab = listOfNotNull(n.cod, n.ubic.takeIf { it.isNotBlank() && it != n.cod },
+            n.cond.takeIf { it.isNotEmpty() }?.let { textoCond(it) }).joinToString(" · ")
+        return cab + "\n" + (if (n.texto.isBlank()) "   (sin nota)" else n.texto.lines().joinToString("\n") { "   $it" })
+    }
+
+    private fun textoResumenNotas(lista: List<NotaComp>): String {
+        val sb = StringBuilder()
+        sb.append("Resumen de notas — $evento\n")
+        sb.append("Actualizado: ${SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date())}\n")
+        val crit = lista.count { it.cond == "crit" }; val obs = lista.count { it.cond == "obs" }
+        sb.append("${lista.count { it.texto.isNotBlank() }} notas · $crit crítico(s) · $obs observación(es)\n")
+        for ((g, items) in lista.groupBy { it.grupo }) {
+            sb.append("\n== $g ==\n")
+            items.forEach { sb.append(lineaNota(it)).append("\n") }
+        }
+        return sb.toString().trimEnd()
+    }
+
+    /** "Resumen notas <evento>.txt" en la carpeta del evento. */
+    private fun guardarResumenNotas(lista: List<NotaComp> = notasCompiladas()) =
+        escribirTexto("$raiz/$evento/", "Resumen notas $evento.txt", if (lista.isEmpty()) "" else textoResumenNotas(lista))
+
+    private fun verResumenNotas() {
+        val todas = notasCompiladas()
+        if (todas.isEmpty()) { aviso("Este evento aún no tiene notas"); return }
+        guardarResumenNotas(todas)
+        val col = columna()
+        val lista = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var dlg: AlertDialog? = null
+        val filtros = listOf<Pair<String, (NotaComp) -> Boolean>>(
+            "Todas" to { true }, "⚠ Críticos" to { it.cond == "crit" }, "Observación" to { it.cond == "obs" })
+        fun llenar(f: (NotaComp) -> Boolean) {
+            lista.removeAllViews()
+            val sel = todas.filter(f)
+            if (sel.isEmpty()) lista.addView(texto("Nada en este filtro.", 13f))
+            for ((g, items) in sel.groupBy { it.grupo }) {
+                lista.addView(texto("$g (${items.size})", 15f, true).apply { setPadding(0, dp(12), 0, dp(4)) })
+                for (n in items) {
+                    lista.addView(texto(lineaNota(n), 14f).apply {
+                        setPadding(dp(10), dp(8), dp(10), dp(8))
+                        background = fondoRedondeado(Color.WHITE, 10,
+                            when (n.cond) { "crit" -> C.peligro; "obs" -> C.acento; else -> C.tenue }, if (n.cond == "crit") 2 else 1)
+                        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, dp(3), 0, dp(3)) }
+                        n.clave?.let { k -> setOnClickListener { dlg?.dismiss(); editarNota(k) } }
+                    })
+                }
+            }
+        }
+        val barra = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((t, f) in filtros) {
+            val cuenta = todas.count(f)
+            if (t != "Todas" && cuenta == 0) continue
+            barra.addView(Button(this).apply {
+                text = "$t ($cuenta)"; isAllCaps = false; textSize = 13f
+                setOnClickListener { llenar(f) }
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            })
+        }
+        col.addView(barra)
+        col.addView(texto("Toca una nota para editarla. También queda en \"Resumen notas $evento.txt\" en la carpeta del evento.", 12f))
+        col.addView(lista)
+        llenar { true }
+        dlg = AlertDialog.Builder(this).setTitle("Resumen de notas — $evento").setView(scroll(col))
+            .setPositiveButton("Cerrar", null)
+            .setNeutralButton("Compartir") { _, _ ->
+                val i = Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_SUBJECT, "Resumen de notas — $evento")
+                    .putExtra(Intent.EXTRA_TEXT, textoResumenNotas(todas))
+                runCatching { startActivity(Intent.createChooser(i, "Compartir resumen")) }
+                    .onFailure { aviso("No hay app para compartir") }
+            }.create()
+        mostrar(dlg)
+    }
+
+
     private fun exportarNotas(): Int {
+        runCatching { guardarResumenNotas() }
         val lista = todasLasNotas()
         val arbol = notasArbol()
         val nombre = "Notas $evento.csv"
@@ -2960,6 +3081,11 @@ class MainActivity : AppCompatActivity() {
                     hojas.count { it.est == 2 }, hojas.count { it.est == 1 }, hojas.count { it.est == 0 },
                     todos.count { it.nota.isNotBlank() }, todos.mapNotNull { it.min }.minOrNull())
             }
+        }
+        val notasC = notasCompiladas()
+        if (notasC.isNotEmpty()) {
+            val h = x.hoja("Notas", listOf("Componente", "Ubicación", "Código", "Condición", "Nota"), listOf(24, 36, 14, 13, 70))
+            notasC.forEach { n -> h.fila(n.grupo, n.ubic, n.cod, condCelda(n.cond), n.texto.ifBlank { null }) }
         }
         val regs = registros()
         if (regs.isNotEmpty()) {
