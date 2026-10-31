@@ -48,14 +48,15 @@ foto; echo "foto -"
 tap "volver el brillo a 0" 2; cap brillo_cero; echo "textos 0: $(textos)"
 # deja +2 pasos para probar que se recuerda
 tap "=+" 1; tap "=+" 1
+tap "☀" 2   # cerrar el panel para probar el anillo
 
 # --- Anillo de enfoque: tocar dentro de la foto, en la franja negra y cerca del borde ---
 adb exec-out screencap -p > $OUT/ref.png
-adb shell input tap $((WX/2)) $((WY/2)); sleep 0.3; cap anillo_centro
+adb shell input tap $((WX/2)) $((WY*45/100)); sleep 0.2; cap anillo_centro
 sleep 3
-adb shell input tap $((WX/2)) $((WY*86/100)); sleep 0.3; cap anillo_franja_abajo
+adb shell input tap $((WX*3/4)) $((WY*86/100)); sleep 0.2; cap anillo_franja_abajo
 sleep 3
-adb shell input tap 8 $((WY/2)); sleep 0.3; cap anillo_borde_izq
+adb shell input tap 4 $((WY*45/100)); sleep 0.2; cap anillo_borde_izq
 sleep 3
 
 # --- Reabrir: el brillo debe recordarse ---
