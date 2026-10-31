@@ -1,0 +1,7 @@
+AP01_general_1.jpg (1856, 1392) brillo medio 197.6
+AP01_general_2.jpg (1856, 1392) brillo medio 232.9
+AP01_general_3.jpg (1856, 1392) brillo medio 127.1
+01_camara_inicio.png pantalla (zona central) 0.0
+03_brillo_mas.png pantalla (zona central) 248.3
+04_brillo_menos.png pantalla (zona central) 141.5
+05_brillo_cero.png pantalla (zona central) 213.3

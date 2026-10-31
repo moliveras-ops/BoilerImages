@@ -1,0 +1,5 @@
+10-31 17:14:27.034  2961  2961 D PruebaFoco: toque 160.0,264.0 dur=0 area=RectF(0.0, 94.66666, 320.0, 521.3334) vista=320x616 res=320x240
+10-31 17:14:27.044  2961  2961 D PruebaFoco: anillo en 160.0,264.0
+10-31 17:14:32.211  2961  2961 D PruebaFoco: toque 240.0,526.0 dur=0 area=RectF(0.0, 94.66666, 320.0, 521.3334) vista=320x616 res=320x240
+10-31 17:14:35.376  2961  2961 D PruebaFoco: toque 4.0,264.0 dur=0 area=RectF(0.0, 94.66666, 320.0, 521.3334) vista=320x616 res=320x240
+10-31 17:14:35.377  2961  2961 D PruebaFoco: anillo en 42.0,264.0
