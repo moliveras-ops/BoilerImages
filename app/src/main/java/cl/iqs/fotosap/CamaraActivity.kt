@@ -28,6 +28,7 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
@@ -64,6 +65,7 @@ import java.util.concurrent.TimeUnit
  *  - Saltar a la singularidad anterior / siguiente (recorre todas las paredes del tipo).
  *  - Lentes 0,6× · 1× · 3× · 5× (según lo que ofrezca el teléfono), pellizcar para zoom.
  *  - Linterna fija, tocar para enfocar y medir la luz en ese punto.
+ *  - Brillo (compensación de exposición) con barra y botones − / +; se recuerda.
  *  - Resolución Normal (12 MP) o Máxima; modos HDR / Noche si el teléfono los ofrece.
  *
  * Extras de entrada: "rutas", "codigos" (ej. AP01), "titulos" (ej. AP01 · Pared Frontal),
@@ -105,6 +107,14 @@ class CamaraActivity : AppCompatActivity() {
     private lateinit var miniatura: ImageView
     private lateinit var btnRes: TextView
     private lateinit var btnExt: TextView
+    private lateinit var btnBrillo: TextView
+    private lateinit var panelBrillo: LinearLayout
+    private lateinit var barraBrillo: SeekBar
+    private lateinit var txtBrillo: TextView
+    private var brillo = 0          // índice de compensación de exposición
+    private var brilloMin = 0
+    private var brilloMax = 0
+    private var brilloPaso = 0f     // EV por paso
     private lateinit var destello: View
     private lateinit var anilloFoco: View
     private var ultimaUri: Uri? = null
@@ -131,6 +141,7 @@ class CamaraActivity : AppCompatActivity() {
         modo = savedInstanceState?.getString("modo") ?: intent.getStringExtra("modo") ?: "general"
         fotosTomadas = savedInstanceState?.getInt("fotos") ?: 0
         linterna = prefs.getBoolean("cam_linterna", false)
+        brillo = prefs.getInt("cam_brillo", 0)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.statusBarColor = oscuro
         window.navigationBarColor = oscuro
@@ -229,6 +240,8 @@ class CamaraActivity : AppCompatActivity() {
         fila1.addView(textos, LinearLayout.LayoutParams(0, -2, 1f))
         btnRes = chipChico { cambiarResolucion() }
         btnExt = chipChico { cambiarExtension() }
+        btnBrillo = chipChico { alternarPanelBrillo() }.apply { visibility = View.GONE }
+        fila1.addView(btnBrillo, LinearLayout.LayoutParams(-2, dp(40)).apply { marginEnd = dp(6) })
         fila1.addView(btnRes, LinearLayout.LayoutParams(-2, dp(40)).apply { marginEnd = dp(6) })
         fila1.addView(btnExt, LinearLayout.LayoutParams(-2, dp(40)))
         arriba.addView(fila1)
@@ -249,6 +262,40 @@ class CamaraActivity : AppCompatActivity() {
         val abajo = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
         }
+        panelBrillo = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; visibility = View.GONE
+            background = GradientDrawable().apply { cornerRadius = dp(26).toFloat(); setColor(panel) }
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+        }
+        fun botonPaso(t: String, d: Int) = TextView(this).apply {
+            text = t; textSize = 24f; typeface = medio; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
+            background = RippleDrawable(ColorStateList.valueOf(Color.argb(60, 255, 255, 255)),
+                GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(gris) },
+                GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) })
+            isClickable = true; setOnClickListener { fijarBrillo(brillo + d) }
+            layoutParams = LinearLayout.LayoutParams(dp(46), dp(46))
+        }
+        panelBrillo.addView(botonPaso("−", -1))
+        barraBrillo = SeekBar(this).apply {
+            progressTintList = ColorStateList.valueOf(acento); thumbTintList = ColorStateList.valueOf(acento)
+            setPadding(dp(18), dp(10), dp(18), dp(10))
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(b: SeekBar, v: Int, deUsuario: Boolean) { if (deUsuario) fijarBrillo(v + brilloMin) }
+                override fun onStartTrackingTouch(b: SeekBar) {}
+                override fun onStopTrackingTouch(b: SeekBar) {}
+            })
+        }
+        panelBrillo.addView(barraBrillo, LinearLayout.LayoutParams(0, dp(46), 1f))
+        panelBrillo.addView(botonPaso("+", 1))
+        txtBrillo = TextView(this).apply {
+            textSize = 14f; typeface = medio; gravity = Gravity.CENTER; setTextColor(Color.WHITE); maxLines = 1
+            background = fondo(gris, 20); isClickable = true
+            setOnClickListener { fijarBrillo(0) }
+            contentDescription = "Volver el brillo a 0"
+        }
+        panelBrillo.addView(txtBrillo, LinearLayout.LayoutParams(dp(70), dp(46)).apply { marginStart = dp(6) })
+        abajo.addView(panelBrillo, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(12), 0, dp(12), dp(8)) })
+
         filaLentes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(8)) }
         abajo.addView(filaLentes)
 
@@ -327,6 +374,12 @@ class CamaraActivity : AppCompatActivity() {
         btnRes.text = captura?.resolutionInfo?.resolution?.let { "${mp(it)} MP" }
             ?: if (prefs.getString("cam_res", "normal") == "max") "Máx" else "12 MP"
         btnExt.text = nombreExt(extActual)
+        btnBrillo.text = "☀ " + textoEv(brillo)
+        btnBrillo.background = fondo(if (brillo != 0) acento else gris, 20)
+        btnBrillo.setTextColor(if (brillo != 0) tinta else Color.WHITE)
+        txtBrillo.text = if (brillo == 0) "0 EV" else textoEv(brillo)
+        barraBrillo.max = brilloMax - brilloMin
+        barraBrillo.progress = brillo - brilloMin
         btnExt.visibility = if (extDisponibles.size > 1) View.VISIBLE else View.GONE
         btnLinterna.background = RippleDrawable(ColorStateList.valueOf(Color.argb(60, 255, 255, 255)),
             GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (linterna) acento else gris) },
@@ -436,6 +489,7 @@ class CamaraActivity : AppCompatActivity() {
         }
         val c = camara!!
         if (linterna && c.cameraInfo.hasFlashUnit()) c.cameraControl.enableTorch(true)
+        prepararBrillo(c)
         c.cameraInfo.zoomState.observe(this) { armarLentes() }
         armarLentes()
         refrescar()
@@ -492,6 +546,44 @@ class CamaraActivity : AppCompatActivity() {
         c.cameraControl.enableTorch(linterna)
         prefs.edit().putBoolean("cam_linterna", linterna).apply()
         refrescar()
+    }
+
+    /** Rango de brillo que ofrece la cámara (o el modo HDR/Noche); vuelve a aplicar el valor recordado. */
+    private fun prepararBrillo(c: Camera) {
+        val e = c.cameraInfo.exposureState
+        if (!e.isExposureCompensationSupported) {
+            brilloMin = 0; brilloMax = 0; brilloPaso = 0f
+            btnBrillo.visibility = View.GONE; panelBrillo.visibility = View.GONE
+            return
+        }
+        brilloMin = e.exposureCompensationRange.lower
+        brilloMax = e.exposureCompensationRange.upper
+        brilloPaso = e.exposureCompensationStep.toFloat()
+        btnBrillo.visibility = View.VISIBLE
+        brillo = brillo.coerceIn(brilloMin, brilloMax)
+        if (brillo != 0) runCatching { c.cameraControl.setExposureCompensationIndex(brillo) }
+    }
+
+    private fun alternarPanelBrillo() {
+        panelBrillo.visibility = if (panelBrillo.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+    }
+
+    private fun fijarBrillo(v: Int) {
+        val c = camara ?: return
+        val n = v.coerceIn(brilloMin, brilloMax)
+        if (n == brillo && v == n) { refrescar(); return }
+        brillo = n
+        runCatching { c.cameraControl.setExposureCompensationIndex(n) }
+        prefs.edit().putInt("cam_brillo", n).apply()
+        refrescar()
+    }
+
+    /** Valor en EV con signo y coma decimal, ej. "+0,7", "−1,3", "0". */
+    private fun textoEv(i: Int): String {
+        val ev = i * brilloPaso
+        if (i == 0 || brilloPaso == 0f) return "0"
+        val t = "%.1f".format(Math.abs(ev)).replace('.', ',').removeSuffix(",0")
+        return (if (ev > 0) "+" else "−") + t
     }
 
     private fun mp(z: Size): String {
