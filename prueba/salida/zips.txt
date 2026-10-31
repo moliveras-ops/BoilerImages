@@ -1,0 +1,13 @@
+== prueba/salida/zips/BoilerImage Prueba completo 2026-10-31 0135.zip
+Archive:  prueba/salida/zips/BoilerImage Prueba completo 2026-10-31 0135.zip
+  Length      Date    Time    Name
+---------  ---------- -----   ----
+     4516  2026-10-31 01:35   Prueba/BoilerImage Prueba.xlsx
+       83  2026-10-31 01:35   Prueba/Notas Prueba.csv
+    59917  2026-10-31 01:35   Prueba/Panel 01/Tubo 01/P01-T01_detalle_1.jpg
+    60959  2026-10-31 01:35   Prueba/Panel 01/Tubo 01/P01-T01_general_1.jpg
+       25  2026-10-31 01:35   Prueba/Panel 01/Tubo 01/nota.txt
+    60406  2026-10-31 01:35   Prueba/Panel 01/Tubo 02/P01-T02_detalle_1.jpg
+      193  2026-10-31 01:35   Prueba/Resumen notas Prueba.txt
+---------                     -------
+   186099                     7 files

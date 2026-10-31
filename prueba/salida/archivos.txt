@@ -1,0 +1,11 @@
+/sdcard/Documents/BoilerImage/Prueba
+/sdcard/Documents/BoilerImage/Prueba/Panel 01
+/sdcard/Documents/BoilerImage/Prueba/Panel 01/Tubo 01
+/sdcard/Documents/BoilerImage/Prueba/Panel 01/Tubo 01/nota.txt
+/sdcard/Documents/BoilerImage/Prueba/Panel 01/Tubo 01/P01-T01_general_1.jpg
+/sdcard/Documents/BoilerImage/Prueba/Panel 01/Tubo 01/P01-T01_detalle_1.jpg
+/sdcard/Documents/BoilerImage/Prueba/Panel 01/Tubo 02
+/sdcard/Documents/BoilerImage/Prueba/Panel 01/Tubo 02/P01-T02_detalle_1.jpg
+/sdcard/Documents/BoilerImage/Prueba/Resumen notas Prueba.txt
+/sdcard/Documents/BoilerImage/Prueba/Notas Prueba.csv
+/sdcard/Documents/BoilerImage/Prueba/BoilerImage Prueba.xlsx
