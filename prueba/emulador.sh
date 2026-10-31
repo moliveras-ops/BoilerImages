@@ -117,6 +117,10 @@ abajo; abajo; abajo; tap "volver"; sleep 2
 
 # --- Exportaciones ---
 abajo; abajo; cap raiz_final
+tap "resumen de notas"; sleep 3; cap resumen_notas
+tap "críticos"; sleep 2; cap resumen_criticos
+tap "=Cerrar"; sleep 1
+adb pull "/sdcard/Documents/BoilerImage/Prueba/Resumen notas Prueba.txt" $OUT/resumen.txt
 tap "exportar a excel"; sleep 6; cap excel
 adb pull "/sdcard/Documents/BoilerImage/Prueba/BoilerImage Prueba.xlsx" $OUT/prueba.xlsx
 adb pull "/sdcard/Documents/BoilerImage/Prueba/Notas Prueba.csv" $OUT/notas.csv

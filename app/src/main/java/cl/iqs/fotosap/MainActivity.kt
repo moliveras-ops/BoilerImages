@@ -81,19 +81,56 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val dictado = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        val txt = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        val lista = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS).orEmpty().filter { it.isNotBlank() }
+        val conf = res.data?.getFloatArrayExtra(RecognizerIntent.EXTRA_CONFIDENCE_SCORES)
         val et = dictadoDestino ?: notaEditando
-        if (!txt.isNullOrBlank() && et != null) {
-            if (dictadoNumero) {
-                val v = numeroDictado(txt)
-                if (v.isBlank()) aviso("No entendí un número: \"$txt\"") else et.setText(v)
-            } else {
-                val actual = et.text.toString().trimEnd()
-                et.setText(if (actual.isEmpty()) txt else "$actual $txt")
-            }
-            et.setSelection(et.text.length)
-        }
+        val numero = dictadoNumero
         dictadoDestino = null; dictadoNumero = false
+        if (lista.isEmpty() || et == null) return@registerForActivityResult
+        if (numero) {
+            val nums = lista.map { numeroDictado(corregirDictado(it, false)) }.filter { it.isNotBlank() }.distinct()
+            when {
+                nums.isEmpty() -> aviso("No entendí un número: \"${lista[0]}\"")
+                nums.size == 1 -> { et.setText(nums[0]); et.setSelection(et.text.length) }
+                else -> menuGrande("¿Qué valor dijiste?", nums.map { v ->
+                    "${v.replace('.', ',')} mm" to { et.setText(v); et.setSelection(et.text.length) } })
+            }
+            return@registerForActivityResult
+        }
+        // Comando: deshacer lo último dictado
+        if (lista.any { quitarTildes(it).trim().trimEnd('.') in setOf("borrar lo ultimo", "borrar ultimo", "borra lo ultimo") }) {
+            val (e, t) = ultimoDictado ?: run { aviso("No hay dictado que borrar"); return@registerForActivityResult }
+            if (e === et && et.text.toString().endsWith(t)) {
+                et.setText(et.text.toString().dropLast(t.length).trimEnd()); et.setSelection(et.text.length)
+                aviso("Se borró: \"${t.trim()}\"")
+            } else aviso("No hay dictado que borrar")
+            ultimoDictado = null
+            return@registerForActivityResult
+        }
+        val textos = lista.map { corregirDictado(it, true) }.filter { it.isNotBlank() }.distinct()
+        if (textos.isEmpty()) return@registerForActivityResult
+        // Si el reconocedor duda (confianza baja), se ofrecen las alternativas
+        val duda = conf != null && conf.isNotEmpty() && conf[0] in 0f..0.7f
+        if (textos.size > 1 && duda)
+            menuGrande("¿Qué dijiste?", textos.take(5).map { t -> t to { agregarDictado(et, t) } })
+        else agregarDictado(et, textos[0])
+    }
+    private var ultimoDictado: Pair<EditText, String>? = null
+
+    private fun agregarDictado(et: EditText, txt: String) {
+        val actual = et.text.toString()
+        val sep = when {
+            actual.isBlank() -> ""
+            actual.endsWith("\n") || txt.startsWith("\n") -> ""
+            else -> " "
+        }
+        // mayúscula al inicio o después de punto
+        val t = if (actual.isBlank() || actual.trimEnd().endsWith(".") || actual.endsWith("\n"))
+            txt.replaceFirstChar { it.uppercase() } else txt
+        val nuevo = actual.trimEnd(' ') + sep + t
+        val agregado = nuevo.substring(actual.trimEnd(' ').length)
+        et.setText(nuevo); et.setSelection(et.text.length)
+        ultimoDictado = et to agregado
     }
     private var dictadoDestino: EditText? = null
     private var dictadoNumero = false
@@ -411,6 +448,7 @@ class MainActivity : AppCompatActivity() {
             enCalderas = true; plantaActual = null; render()
         })
         col.addView(boton("💾  Respaldo y restauración") { menuRespaldo() })
+        col.addView(boton("🎤  Dictado: correcciones de palabras (${listaCorrecciones().size})") { editarCorrecciones() })
         col.addView(selector("📷", "Cámara", listOf("BoilerImage", "Teléfono"), if (camaraPropia()) 0 else 1) { i ->
             prefs.edit().putBoolean("camaraPropia", i == 0).apply()
             render()
@@ -461,6 +499,7 @@ class MainActivity : AppCompatActivity() {
         }
         col.addView(espacio(12))
         col.addView(boton("💾  Guardar como plantilla de caldera") { guardarComoPlantilla() })
+        col.addView(boton("📝  Resumen de notas (${notasCompiladas().size})") { verResumenNotas() })
         col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
         col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
         col.addView(espacio(16))
@@ -1098,6 +1137,7 @@ class MainActivity : AppCompatActivity() {
 
         col.addView(espacio(16))
         if (prof == 0 && elem) {
+            col.addView(boton("📝  Resumen de notas (${notasCompiladas().size})") { verResumenNotas() })
             col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
             col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
         }
@@ -1824,12 +1864,120 @@ class MainActivity : AppCompatActivity() {
     /** Dictado por voz. [destino] = campo que recibe el texto; [numero] = convertir a número (espesor). */
     private fun dictar(destino: EditText? = null, numero: Boolean = false) {
         dictadoDestino = destino; dictadoNumero = numero
+        val sinRed = runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            cm.activeNetwork == null
+        }.getOrDefault(false)
         val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PROMPT, if (numero) "Dicta el espesor (ej. 18 coma 29)" else "Dicta la nota")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-CL")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "es-CL")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+            // sin señal (dentro de la caldera): usar el reconocimiento del teléfono
+            if (sinRed) putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            // más tiempo de silencio antes de cortar (pausas al pensar)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, if (numero) 1500L else 3000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, if (numero) 1500L else 3000L)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, if (numero) "Dicta el espesor (ej. 18 coma 29)"
+                else "Dicta la nota · \"punto\", \"coma\", \"nueva línea\", \"borrar lo último\"")
         }
         try { dictado.launch(i) }
         catch (e: Exception) { aviso("El dictado por voz no está disponible en este teléfono") }
+    }
+
+    private fun quitarTildes(t: String) = java.text.Normalizer.normalize(t.lowercase(Locale.ROOT), java.text.Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}"), "")
+
+    // ---------- Correcciones del dictado (editables en Configuración) ----------
+
+    private val correccionesBase = """
+        # Una por línea:  lo que entiende = lo que debe escribir
+        a pe = AP
+        cu pe = QP
+        cu ce = QC
+        be ele = BL
+        pe ge pe = PGP
+        pe de a = PDA
+        erre e erre = RER
+        u te = UT
+        ultra sonido = ultrasonido
+        milímetros = mm
+        milímetro = mm
+        sobre calentador = sobrecalentador
+        sobre calentadores = sobrecalentadores
+        de laminación = delaminación
+        termo cupla = termocupla
+        por ciento = %
+        más menos = ±
+    """.trimIndent()
+
+    private fun textoCorrecciones() = prefs.getString("dict_corr", null) ?: correccionesBase
+
+    private fun listaCorrecciones(): List<Pair<String, String>> = textoCorrecciones().lines()
+        .map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") && "=" in it }
+        .map { it.substringBefore("=").trim() to it.substringAfter("=").trim() }
+        .filter { it.first.isNotEmpty() }
+        .sortedByDescending { it.first.length }   // las frases largas primero
+
+    private fun palabra(f: String) = Regex("(?<![\\p{L}\\d])" + Regex.escape(f) + "(?![\\p{L}\\d])",
+        setOf(RegexOption.IGNORE_CASE))
+
+    /** Aplica las correcciones de vocabulario y (en notas) la puntuación dictada. */
+    private fun corregirDictado(t0: String, puntuacion: Boolean): String {
+        var t = " ${t0.trim()} "
+        for ((dice, escribe) in listaCorrecciones()) t = palabra(dice).replace(t, Regex.escapeReplacement(escribe))
+        // código + número: "AP 1" → AP01, "QP 12" → QP12
+        t = Regex("(?<![\\p{L}\\d])([A-Z]{2,4})[\\s-]*(\\d{1,3})(?![\\d,.])").replace(t) { m ->
+            m.groupValues[1] + m.groupValues[2].padStart(2, '0')
+        }
+        t = Regex("(\\d)\\s*°?\\s*grados").replace(t, "$1°")
+        if (puntuacion) {
+            fun r(f: String, x: String) { t = palabra(f).replace(t, Regex.escapeReplacement(x)) }
+            r("punto y aparte", ".\n"); r("punto aparte", ".\n"); r("nueva línea", "\n"); r("nueva linea", "\n")
+            r("punto seguido", "."); r("punto final", "."); r("dos puntos", ":")
+            t = Regex("(\\d)\\s+coma\\s+(\\d)", RegexOption.IGNORE_CASE).replace(t, "$1,$2")
+            r("coma", ",")
+            t = Regex("\\s+punto\\s*$", RegexOption.IGNORE_CASE).replace(t, ".")
+            t = t.replace(Regex("[ \\t]+([.,:;%])"), "$1")
+                .replace(Regex("([.,:;])(?=[^\\s\\d])"), "$1 ")
+                .replace(Regex("[ \\t]*\\n[ \\t]*"), "\n")
+                .replace(Regex("\\.\\s+(\\p{Ll})")) { ". " + it.groupValues[1].uppercase() }
+                .replace(Regex("\\n(\\p{Ll})")) { "\n" + it.groupValues[1].uppercase() }
+        }
+        return t.replace(Regex("[ \\t]{2,}"), " ").trim(' ')
+    }
+
+    private fun editarCorrecciones() {
+        val et = EditText(this).apply {
+            setText(textoCorrecciones()); textSize = 16f; minLines = 10
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        val col = columna()
+        col.addView(texto("Cuando el dictado entienda mal una palabra, agrégala aquí:\n" +
+                          "lo que entiende = lo que debe escribir (ej.  sobre calentador = sobrecalentador).\n" +
+                          "Comandos en notas: \"punto\", \"coma\", \"punto y aparte\", \"nueva línea\", \"dos puntos\", " +
+                          "\"borrar lo último\". \"AP 1\" se escribe AP01.", 13f))
+        col.addView(et)
+        col.addView(boton("🧪  Probar con la voz") {
+            dictar(object : EditText(this) {
+                override fun setText(text: CharSequence?, type: android.widget.TextView.BufferType?) {
+                    super.setText(text, type)
+                    if (!text.isNullOrEmpty()) aviso("Resultado: $text")
+                }
+            })
+        })
+        mostrar(AlertDialog.Builder(this).setTitle("Dictado — correcciones").setView(scroll(col))
+            .setPositiveButton("Guardar") { _, _ ->
+                prefs.edit().putString("dict_corr", et.text.toString()).apply()
+                aviso("${listaCorrecciones().size} correcciones guardadas"); render()
+            }
+            .setNeutralButton("Restablecer") { _, _ ->
+                confirmar("¿Volver a la lista de correcciones original?") {
+                    prefs.edit().remove("dict_corr").apply(); render()
+                }
+            }
+            .setNegativeButton("Cancelar", null).create())
     }
 
     private val palabrasNum = mapOf(
@@ -2568,7 +2716,126 @@ class MainActivity : AppCompatActivity() {
         return res
     }
 
+    // ---------- Resumen de notas compilado (todo el evento, agrupado por componente) ----------
+
+    /** Nota de un componente: grupo (tipo o carpeta principal), ubicación, código, condición, texto. */
+    private class NotaComp(val grupo: String, val ubic: String, val cod: String, val cond: String,
+                           val texto: String, val clave: String?)
+
+    private fun notasCompiladas(): List<NotaComp> {
+        val conNota = carpetasConNota()
+        val cs = conds()
+        val res = mutableListOf<NotaComp>()
+        tipos.forEachIndexed { ti, t ->
+            t.paredes.forEachIndexed { pi, p ->
+                for (n in 1..p.cantidad) {
+                    val ruta = carpeta(t, p, n)
+                    val txt = if (ruta in conNota) leerNota(ruta) else ""
+                    val c = cs.optString(ruta)
+                    if (txt.isNotBlank() || c == "crit" || c == "obs")
+                        res.add(NotaComp(t.nombre, p.nombre, "%s%02d".format(t.prefijo, n), c, txt, "s/$ti/$pi/$n"))
+                }
+            }
+        }
+        insps.forEachIndexed { ii, ins ->
+            for (r in listOf(emptyList<Int>()) + todosNodos(ins.nodo)) {
+                val clave = claveNodo(ii, r)
+                val d = destDe(clave) ?: continue
+                val txt = if (d.ruta in conNota) leerNota(d.ruta) else ""
+                val c = cs.optString(d.ruta)
+                if (txt.isBlank() && c != "crit" && c != "obs") continue
+                val cad = cadena(ii, r)
+                val grupo = if (esElementos()) cad.firstOrNull()?.nombre ?: "Carpeta principal" else ins.nodo.nombre
+                val ubic = if (cad.isEmpty()) "(carpeta principal)" else cad.joinToString(" › ") { it.nombre }
+                res.add(NotaComp(grupo, ubic, d.codigo, c, txt, clave))
+            }
+        }
+        for (rg in registros().sortedBy { it.num }) {
+            if (rg.nota.isBlank()) continue
+            res.add(NotaComp("Notas en terreno", "Registro %02d".format(rg.num) +
+                (if (rg.valor.isNotBlank()) " · ${textoValor(rg.valor)}" else ""), "R%02d".format(rg.num), "", rg.nota, null))
+        }
+        return res
+    }
+
+    private fun lineaNota(n: NotaComp): String {
+        val cab = listOfNotNull(n.cod, n.ubic.takeIf { it.isNotBlank() && it != n.cod },
+            n.cond.takeIf { it.isNotEmpty() }?.let { textoCond(it) }).joinToString(" · ")
+        return cab + "\n" + (if (n.texto.isBlank()) "   (sin nota)" else n.texto.lines().joinToString("\n") { "   $it" })
+    }
+
+    private fun textoResumenNotas(lista: List<NotaComp>): String {
+        val sb = StringBuilder()
+        sb.append("Resumen de notas — $evento\n")
+        sb.append("Actualizado: ${SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date())}\n")
+        val crit = lista.count { it.cond == "crit" }; val obs = lista.count { it.cond == "obs" }
+        sb.append("${lista.count { it.texto.isNotBlank() }} notas · $crit crítico(s) · $obs observación(es)\n")
+        for ((g, items) in lista.groupBy { it.grupo }) {
+            sb.append("\n== $g ==\n")
+            items.forEach { sb.append(lineaNota(it)).append("\n") }
+        }
+        return sb.toString().trimEnd()
+    }
+
+    /** "Resumen notas <evento>.txt" en la carpeta del evento. */
+    private fun guardarResumenNotas(lista: List<NotaComp> = notasCompiladas()) =
+        escribirTexto("$raiz/$evento/", "Resumen notas $evento.txt", if (lista.isEmpty()) "" else textoResumenNotas(lista))
+
+    private fun verResumenNotas() {
+        val todas = notasCompiladas()
+        if (todas.isEmpty()) { aviso("Este evento aún no tiene notas"); return }
+        guardarResumenNotas(todas)
+        val col = columna()
+        val lista = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var dlg: AlertDialog? = null
+        val filtros = listOf<Pair<String, (NotaComp) -> Boolean>>(
+            "Todas" to { true }, "⚠ Críticos" to { it.cond == "crit" }, "Observación" to { it.cond == "obs" })
+        fun llenar(f: (NotaComp) -> Boolean) {
+            lista.removeAllViews()
+            val sel = todas.filter(f)
+            if (sel.isEmpty()) lista.addView(texto("Nada en este filtro.", 13f))
+            for ((g, items) in sel.groupBy { it.grupo }) {
+                lista.addView(texto("$g (${items.size})", 15f, true).apply { setPadding(0, dp(12), 0, dp(4)) })
+                for (n in items) {
+                    lista.addView(texto(lineaNota(n), 14f).apply {
+                        setPadding(dp(10), dp(8), dp(10), dp(8))
+                        background = fondoRedondeado(Color.WHITE, 10,
+                            when (n.cond) { "crit" -> C.peligro; "obs" -> C.acento; else -> C.tenue }, if (n.cond == "crit") 2 else 1)
+                        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, dp(3), 0, dp(3)) }
+                        n.clave?.let { k -> setOnClickListener { dlg?.dismiss(); editarNota(k) } }
+                    })
+                }
+            }
+        }
+        val barra = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((t, f) in filtros) {
+            val cuenta = todas.count(f)
+            if (t != "Todas" && cuenta == 0) continue
+            barra.addView(Button(this).apply {
+                text = "$t ($cuenta)"; isAllCaps = false; textSize = 13f
+                setOnClickListener { llenar(f) }
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            })
+        }
+        col.addView(barra)
+        col.addView(texto("Toca una nota para editarla. También queda en \"Resumen notas $evento.txt\" en la carpeta del evento.", 12f))
+        col.addView(lista)
+        llenar { true }
+        dlg = AlertDialog.Builder(this).setTitle("Resumen de notas — $evento").setView(scroll(col))
+            .setPositiveButton("Cerrar", null)
+            .setNeutralButton("Compartir") { _, _ ->
+                val i = Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_SUBJECT, "Resumen de notas — $evento")
+                    .putExtra(Intent.EXTRA_TEXT, textoResumenNotas(todas))
+                runCatching { startActivity(Intent.createChooser(i, "Compartir resumen")) }
+                    .onFailure { aviso("No hay app para compartir") }
+            }.create()
+        mostrar(dlg)
+    }
+
+
     private fun exportarNotas(): Int {
+        runCatching { guardarResumenNotas() }
         val lista = todasLasNotas()
         val arbol = notasArbol()
         val nombre = "Notas $evento.csv"
@@ -2814,6 +3081,11 @@ class MainActivity : AppCompatActivity() {
                     hojas.count { it.est == 2 }, hojas.count { it.est == 1 }, hojas.count { it.est == 0 },
                     todos.count { it.nota.isNotBlank() }, todos.mapNotNull { it.min }.minOrNull())
             }
+        }
+        val notasC = notasCompiladas()
+        if (notasC.isNotEmpty()) {
+            val h = x.hoja("Notas", listOf("Componente", "Ubicación", "Código", "Condición", "Nota"), listOf(24, 36, 14, 13, 70))
+            notasC.forEach { n -> h.fila(n.grupo, n.ubic, n.cod, condCelda(n.cond), n.texto.ifBlank { null }) }
         }
         val regs = registros()
         if (regs.isNotEmpty()) {
