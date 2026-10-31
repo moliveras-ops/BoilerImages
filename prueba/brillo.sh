@@ -52,11 +52,12 @@ tap "☀" 2   # cerrar el panel para probar el anillo
 
 # --- Anillo de enfoque: tocar dentro de la foto, en la franja negra y cerca del borde ---
 adb exec-out screencap -p > $OUT/ref.png
-adb shell input tap $((WX/2)) $((WY*45/100)); sleep 0.2; cap anillo_centro
+toque() { n=$((n+1)); adb shell "input tap $1 $2; screencap -p /sdcard/t.png"; adb pull /sdcard/t.png $OUT/$(printf %02d $n)_$3.png >/dev/null; }
+toque $((WX/2)) $((WY*45/100)) anillo_centro
 sleep 3
-adb shell input tap $((WX*3/4)) $((WY*86/100)); sleep 0.2; cap anillo_franja_abajo
+toque $((WX*3/4)) $((WY*86/100)) anillo_franja_abajo
 sleep 3
-adb shell input tap 4 $((WY*45/100)); sleep 0.2; cap anillo_borde_izq
+toque 4 $((WY*45/100)) anillo_borde_izq
 sleep 3
 
 # --- Reabrir: el brillo debe recordarse ---
@@ -69,6 +70,7 @@ ls -la $OUT/fotos/*
 adb logcat -d > $OUT/logcat.txt
 grep -A40 "FATAL EXCEPTION" $OUT/logcat.txt > $OUT/crash.txt || echo "sin crash" > $OUT/crash.txt
 cat $OUT/crash.txt
+grep PruebaFoco $OUT/logcat.txt > $OUT/foco.txt
 pip install -q pillow >/dev/null 2>&1
 python3 - <<'PY' | tee $OUT/brillo_fotos.txt
 import glob

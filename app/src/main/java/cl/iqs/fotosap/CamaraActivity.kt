@@ -340,6 +340,7 @@ class CamaraActivity : AppCompatActivity() {
         })
         vista.setOnTouchListener { v, e ->
             escala.onTouchEvent(e)
+            if (e.action == MotionEvent.ACTION_UP) android.util.Log.d("PruebaFoco", "toque ${e.x},${e.y} dur=${e.eventTime - e.downTime} area=${areaFoto()} vista=${vista.width}x${vista.height} res=${vistaPrevia?.resolutionInfo?.resolution}")
             if (e.action == MotionEvent.ACTION_UP && !escala.isInProgress && e.eventTime - e.downTime < 300) {
                 if (areaFoto().contains(e.x, e.y)) enfocar(e.x, e.y)
                 v.performClick()
@@ -551,6 +552,7 @@ class CamaraActivity : AppCompatActivity() {
         val cx = if (a.width() > 2 * r) x.coerceIn(a.left + r, a.right - r) else a.centerX()
         val cy = if (a.height() > 2 * r) y.coerceIn(a.top + r, a.bottom - r) else a.centerY()
         anilloFoco.translationX = cx - r; anilloFoco.translationY = cy - r
+        android.util.Log.d("PruebaFoco", "anillo en $cx,$cy")
         anilloFoco.animate().cancel()
         anilloFoco.alpha = 1f; anilloFoco.scaleX = 1.3f; anilloFoco.scaleY = 1.3f
         anilloFoco.animate().scaleX(1f).scaleY(1f).setDuration(200).withEndAction {
