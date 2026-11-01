@@ -42,6 +42,20 @@ import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.TotalCaptureResult
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.GestureDetector
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -70,6 +84,11 @@ import java.util.concurrent.TimeUnit
  *  - Linterna fija, tocar para enfocar y medir la luz en ese punto.
  *  - Brillo (compensación de exposición) con barra y botones − / +; se recuerda.
  *  - Enfoque automático (por defecto) o manual con barra Cerca ↔ Lejos; al abrir la cámara vuelve a Auto.
+ *    En manual, lupa con el centro ampliado para ver la nitidez.
+ *  - Mantener presionado sobre la imagen: bloquea brillo y enfoque (AE/AF) hasta soltarlo.
+ *  - Opciones (⋮): disparo estabilizado (espera a que el teléfono esté quieto), flash al disparar,
+ *    cuadrícula, nivel y macro automática (pasa al gran angular 0,6× cuando el objeto está muy cerca).
+ *  - ★ junto a la miniatura: marca la última foto "para informe" (archivo Para informe.txt de la carpeta).
  *  - Resolución Normal (12 MP) o Máxima; modos HDR / Noche si el teléfono los ofrece.
  *
  * Extras de entrada: "rutas", "codigos" (ej. AP01), "titulos" (ej. AP01 · Pared Frontal),
@@ -129,6 +148,41 @@ class CamaraActivity : AppCompatActivity() {
     private var enfoque = 500                       // 0 = lo más cerca … PASOS_ENFOQUE = infinito
     private var dioptriasMin = 0f                   // 1 / distancia mínima en metros (0 = foco fijo)
     private val PASOS_ENFOQUE = 1000
+
+    // opciones (⋮)
+    private var optEstab = true
+    private var optFlash = false
+    private var optGrilla = true
+    private var optNivel = true
+    private var optMacro = true
+    private lateinit var btnOpciones: TextView
+    private lateinit var barraArriba: View
+    private lateinit var guia: Guia
+    private lateinit var txtAviso: TextView           // "Mantén quieto…", "AE/AF bloqueado", "Macro"
+    private lateinit var lupa: ImageView
+    private lateinit var btnEstrella: TextView
+    private var ultimaRuta = ""
+    private var ultimaEstrella = false
+
+    // sensores
+    private val sensores by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
+    private val giro by lazy { sensores.getDefaultSensor(Sensor.TYPE_GYROSCOPE) }
+    private val gravedad by lazy { sensores.getDefaultSensor(Sensor.TYPE_GRAVITY) ?: sensores.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) }
+    @Volatile private var ultimoMovimiento = 0L      // última vez que el giro superó el umbral (uptime ms)
+    private val g = FloatArray(3)
+    private var hayGravedad = false
+    private val manejador = Handler(Looper.getMainLooper())
+
+    // bloqueo AE/AF
+    private var bloqueado = false
+    private var aeBloqueado = false
+
+    // macro automática
+    @Volatile private var zoomActual = 1f
+    @Volatile private var zoomMin = 1f
+    @Volatile private var macroAuto = false           // la app pasó a 0,6× por cercanía
+    @Volatile private var macroDesde = 0L
+    @Volatile private var macroPausa = 0L             // no volver a cambiar antes de este instante
     private lateinit var destello: View
     private lateinit var anilloFoco: View
     private var ultimaUri: Uri? = null
@@ -156,6 +210,11 @@ class CamaraActivity : AppCompatActivity() {
         fotosTomadas = savedInstanceState?.getInt("fotos") ?: 0
         linterna = prefs.getBoolean("cam_linterna", false)
         brillo = prefs.getInt("cam_brillo", 0)
+        optEstab = prefs.getBoolean("cam_estab", true)
+        optFlash = prefs.getBoolean("cam_flash", false)
+        optGrilla = prefs.getBoolean("cam_grilla", true)
+        optNivel = prefs.getBoolean("cam_nivel", true)
+        optMacro = prefs.getBoolean("cam_macro", true)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.statusBarColor = oscuro
         window.navigationBarColor = oscuro
@@ -174,6 +233,36 @@ class CamaraActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putInt("indice", indice); outState.putString("modo", modo); outState.putInt("fotos", fotosTomadas)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        giro?.let { sensores.registerListener(oyente, it, SensorManager.SENSOR_DELAY_GAME) }
+        gravedad?.let { sensores.registerListener(oyente, it, SensorManager.SENSOR_DELAY_UI) }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        sensores.unregisterListener(oyente)
+        manejador.removeCallbacks(refrescoLupa)
+    }
+
+    private val oyente = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            when (e.sensor.type) {
+                Sensor.TYPE_GYROSCOPE -> {
+                    val w = Math.sqrt((e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]).toDouble())
+                    if (w > 0.07) ultimoMovimiento = SystemClock.uptimeMillis()
+                }
+                else -> {
+                    val a = if (hayGravedad) 0.2f else 1f
+                    for (i in 0..2) g[i] += a * (e.values[i] - g[i])
+                    hayGravedad = true
+                    if (optNivel) guia.invalidate()
+                }
+            }
+        }
+        override fun onAccuracyChanged(s: Sensor, a: Int) {}
     }
 
     override fun onDestroy() {
@@ -235,11 +324,27 @@ class CamaraActivity : AppCompatActivity() {
             alpha = 0f
         }
         raiz.addView(anilloFoco, FrameLayout.LayoutParams(dp(84), dp(84)))
+        guia = Guia()
+        raiz.addView(guia, FrameLayout.LayoutParams(-1, -1))
+        lupa = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP; visibility = View.GONE
+            background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(Color.BLACK); setStroke(dp(3), acento) }
+            setPadding(dp(3), dp(3), dp(3), dp(3)); clipToOutline = true
+        }
+        raiz.addView(lupa, FrameLayout.LayoutParams(dp(180), dp(180), Gravity.CENTER_HORIZONTAL))
+        txtAviso = TextView(this).apply {
+            textSize = 14f; typeface = medio; setTextColor(tinta); gravity = Gravity.CENTER; visibility = View.GONE
+            background = GradientDrawable().apply { cornerRadius = dp(20).toFloat(); setColor(acento) }
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setOnClickListener { if (bloqueado) desbloquear(true) else if (macroAuto) salirMacro(true) }
+        }
+        raiz.addView(txtAviso, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_HORIZONTAL))
 
         // --- Arriba (compacto): cerrar, código, conteo, resolución/modo; luego navegación + General/Detalle ---
         val arriba = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(panel); setPadding(dp(8), dp(6), dp(8), dp(6))
         }
+        barraArriba = arriba
         val fila1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         fila1.addView(botonRedondo(R.drawable.ic_cerrar, 44) { terminar() })
         val textos = LinearLayout(this).apply {
@@ -256,6 +361,8 @@ class CamaraActivity : AppCompatActivity() {
         btnExt = chipChico { cambiarExtension() }
         fila1.addView(btnRes, LinearLayout.LayoutParams(-2, dp(40)).apply { marginEnd = dp(6) })
         fila1.addView(btnExt, LinearLayout.LayoutParams(-2, dp(40)))
+        btnOpciones = chipChico { menuOpciones() }.apply { text = "⋮"; textSize = 20f; contentDescription = "Opciones de cámara" }
+        fila1.addView(btnOpciones, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(6) })
         arriba.addView(fila1)
 
         val fila2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(6), 0, 0) }
@@ -365,6 +472,12 @@ class CamaraActivity : AppCompatActivity() {
             setOnClickListener { revisarUltima() }
         }
         filaDisparo.addView(miniatura, LinearLayout.LayoutParams(dp(54), dp(54)))
+        btnEstrella = TextView(this).apply {
+            text = "★"; textSize = 24f; gravity = Gravity.CENTER; isClickable = true
+            contentDescription = "Marcar la última foto para informe"
+            setOnClickListener { alternarEstrella() }
+        }
+        filaDisparo.addView(btnEstrella, LinearLayout.LayoutParams(dp(46), dp(46)).apply { marginStart = dp(6) })
         filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         fun botonTexto(desc: String, f: () -> Unit) = TextView(this).apply {
             textSize = 12f; typeface = medio; gravity = Gravity.CENTER; maxLines = 2; setLineSpacing(0f, 0.9f)
@@ -399,10 +512,16 @@ class CamaraActivity : AppCompatActivity() {
                 return true
             }
         })
+        val gestos = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onLongPress(e: MotionEvent) {
+                if (!escala.isInProgress && areaFoto().contains(e.x, e.y)) bloquear(e.x, e.y)
+            }
+        })
         vista.setOnTouchListener { v, e ->
             escala.onTouchEvent(e)
+            gestos.onTouchEvent(e)
             if (e.action == MotionEvent.ACTION_UP && !escala.isInProgress && e.eventTime - e.downTime < 300) {
-                if (areaFoto().contains(e.x, e.y)) enfocar(e.x, e.y)
+                if (areaFoto().contains(e.x, e.y)) { if (bloqueado) desbloquear(false); enfocar(e.x, e.y) }
                 v.performClick()
             }
             true
@@ -451,6 +570,9 @@ class CamaraActivity : AppCompatActivity() {
         btnAuto.setTextColor(if (enfoqueManual) Color.WHITE else tinta)
         txtEnfoque.text = if (enfoqueManual) textoDistancia() else "Auto"
         barraEnfoque.progress = enfoque
+        btnEstrella.alpha = if (ultimaUri != null) 1f else 0.35f
+        redondo(btnEstrella, ultimaEstrella)
+        actualizarLupa()
         txtBrillo.text = if (brillo == 0) "0 EV" else textoEv(brillo)
         barraBrillo.max = brilloMax - brilloMin
         barraBrillo.progress = brillo - brilloMin
@@ -518,6 +640,7 @@ class CamaraActivity : AppCompatActivity() {
         finish()
     }
 
+    @OptIn(ExperimentalCamera2Interop::class)
     private fun vincular() {
         val p = proveedor ?: return
         if (tamanos.isEmpty()) leerTamanos(p)
@@ -537,14 +660,16 @@ class CamaraActivity : AppCompatActivity() {
                     setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
             }
             .build()
-        val preview = Preview.Builder()
+        val pb = Preview.Builder()
             .setResolutionSelector(ResolutionSelector.Builder()
                 .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY).build())
-            .build().also { it.setSurfaceProvider(vista.surfaceProvider) }
+        if (extActual == ExtensionMode.NONE) runCatching { Camera2Interop.Extender(pb).setSessionCaptureCallback(vigiaMacro) }
+        val preview = pb.build().also { it.setSurfaceProvider(vista.surfaceProvider) }
         val cap = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setResolutionSelector(selector)
             .setTargetRotation(Surface.ROTATION_0)
+            .setFlashMode(if (optFlash) ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF)
             .build()
         var sel = CameraSelector.DEFAULT_BACK_CAMERA
         if (extActual != ExtensionMode.NONE) extensiones?.let { sel = it.getExtensionEnabledCameraSelector(sel, extActual) }
@@ -566,7 +691,8 @@ class CamaraActivity : AppCompatActivity() {
         if (linterna && c.cameraInfo.hasFlashUnit()) c.cameraControl.enableTorch(true)
         prepararBrillo(c)
         prepararEnfoque(c)
-        c.cameraInfo.zoomState.observe(this) { armarLentes() }
+        c.cameraInfo.zoomState.observe(this) { z -> zoomActual = z.zoomRatio; zoomMin = z.minZoomRatio; armarLentes() }
+        bloqueado = false; aeBloqueado = false; txtAviso.visibility = View.GONE
         armarLentes()
         refrescar()
     }
@@ -595,7 +721,11 @@ class CamaraActivity : AppCompatActivity() {
                 setTextColor(if (activo) tinta else Color.WHITE)
                 background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (activo) acento else panel) }
                 isClickable = true
-                setOnClickListener { c.cameraControl.setZoomRatio(o) }
+                setOnClickListener {
+                    if (macroAuto) { macroAuto = false; txtAviso.visibility = View.GONE }
+                    macroPausa = SystemClock.uptimeMillis() + 8000
+                    c.cameraControl.setZoomRatio(o)
+                }
                 layoutParams = LinearLayout.LayoutParams(dp(46), dp(46)).apply { setMargins(dp(5), 0, dp(5), 0) }
             })
         }
@@ -696,6 +826,7 @@ class CamaraActivity : AppCompatActivity() {
             b.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
             b.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, dioptrias())
         }
+        if (aeBloqueado) b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
         runCatching { Camera2CameraControl.from(c.cameraControl).captureRequestOptions = b.build() }
             .onFailure { if (enfoqueManual) { enfoqueManual = false; aviso("Este modo no permite enfoque manual") } }
     }
@@ -730,6 +861,174 @@ class CamaraActivity : AppCompatActivity() {
         if (i == 0 || brilloPaso == 0f) return "0"
         val t = "%.1f".format(Math.abs(ev)).replace('.', ',').removeSuffix(",0")
         return (if (ev > 0) "+" else "−") + t
+    }
+
+    // ---------- Aviso flotante, bloqueo AE/AF, lupa, estrella, opciones ----------
+
+    private fun mostrarAviso(t: String) {
+        txtAviso.text = t; txtAviso.visibility = View.VISIBLE
+        val a = areaFoto()
+        txtAviso.translationY = maxOf(a.top, barraArriba.bottom.toFloat()) + dp(10)
+    }
+
+    /** Mantener presionado: enfoca y mide en ese punto y deja fijos el enfoque y el brillo. */
+    private fun bloquear(x: Float, y: Float) {
+        val c = camara ?: return
+        val punto = vista.meteringPointFactory.createPoint(x, y)
+        val modos = if (enfoqueManual) FocusMeteringAction.FLAG_AE else FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+        val accion = FocusMeteringAction.Builder(punto, modos).disableAutoCancel().build()
+        aeBloqueado = false; aplicarEnfoque()
+        bloqueado = true
+        vista.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        mostrarAviso("🔒 AE/AF bloqueado · tocar aquí para soltar")
+        val r = dp(42).toFloat(); val a = areaFoto()
+        anilloFoco.animate().cancel()
+        anilloFoco.translationX = x.coerceIn(a.left + r, a.right - r) - r
+        anilloFoco.translationY = y.coerceIn(a.top + r, a.bottom - r) - r
+        anilloFoco.alpha = 1f; anilloFoco.scaleX = 1f; anilloFoco.scaleY = 1f
+        runCatching {
+            val f = c.cameraControl.startFocusAndMetering(accion)
+            f.addListener({ if (bloqueado) { aeBloqueado = true; aplicarEnfoque() } }, ContextCompat.getMainExecutor(this))
+        }
+    }
+
+    private fun desbloquear(avisar: Boolean) {
+        if (!bloqueado) return
+        bloqueado = false; aeBloqueado = false
+        aplicarEnfoque()
+        runCatching { camara?.cameraControl?.cancelFocusAndMetering() }
+        txtAviso.visibility = View.GONE
+        anilloFoco.animate().alpha(0f).setDuration(200).start()
+        if (avisar) aviso("AE/AF libre")
+    }
+
+    /** Lupa: centro de la imagen ampliado ×3 mientras el enfoque manual está abierto. */
+    private val refrescoLupa = object : Runnable {
+        override fun run() {
+            if (lupa.visibility != View.VISIBLE) return
+            val src = runCatching { vista.bitmap }.getOrNull()
+            if (src != null) {
+                val a = areaFoto()
+                val lado = (minOf(a.width(), a.height()) / 3f).toInt().coerceAtLeast(16)
+                val x0 = (a.centerX() - lado / 2).toInt().coerceIn(0, src.width - lado)
+                val y0 = (a.centerY() - lado / 2).toInt().coerceIn(0, src.height - lado)
+                val rec = runCatching { Bitmap.createBitmap(src, x0, y0, lado, lado) }.getOrNull()
+                if (rec != null) lupa.setImageBitmap(rec)
+                if (rec !== src) src.recycle()
+            }
+            manejador.postDelayed(this, 140)
+        }
+    }
+
+    private fun actualizarLupa() {
+        val ver = enfoqueManual && panelEnfoque.visibility == View.VISIBLE
+        if (ver == (lupa.visibility == View.VISIBLE)) return
+        lupa.visibility = if (ver) View.VISIBLE else View.GONE
+        manejador.removeCallbacks(refrescoLupa)
+        if (ver) {
+            lupa.post {
+                val a = areaFoto()
+                lupa.translationY = maxOf(a.top, barraArriba.bottom.toFloat()) + dp(56)
+            }
+            manejador.post(refrescoLupa)
+        }
+    }
+
+    private fun alternarEstrella() {
+        if (ultimaUri == null) { aviso("Primero toma una foto"); return }
+        val r = Informe.alternar(contentResolver, ultimaRuta, ultimoNombre)
+        if (r == null) { aviso("No se pudo guardar la marca"); return }
+        ultimaEstrella = r
+        aviso(if (r) "★ $ultimoNombre para informe" else "Sin marca de informe")
+        refrescar()
+    }
+
+    private fun menuOpciones() {
+        val nombres = arrayOf("Disparo estabilizado (espera a que esté quieto)", "Flash al disparar",
+            "Cuadrícula", "Nivel (horizonte)", "Macro automática (0,6× al acercarse)")
+        val marcas = booleanArrayOf(optEstab, optFlash, optGrilla, optNivel, optMacro)
+        AlertDialog.Builder(this).setTitle("Opciones de cámara")
+            .setMultiChoiceItems(nombres, marcas) { _, i, v -> marcas[i] = v }
+            .setPositiveButton("Listo") { _, _ ->
+                val flashAntes = optFlash
+                optEstab = marcas[0]; optFlash = marcas[1]; optGrilla = marcas[2]; optNivel = marcas[3]; optMacro = marcas[4]
+                prefs.edit().putBoolean("cam_estab", optEstab).putBoolean("cam_flash", optFlash)
+                    .putBoolean("cam_grilla", optGrilla).putBoolean("cam_nivel", optNivel).putBoolean("cam_macro", optMacro).apply()
+                if (optFlash != flashAntes) captura?.flashMode = if (optFlash) ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF
+                if (optFlash && linterna) aviso("Con la linterna encendida el flash no se usa")
+                if (!optMacro && macroAuto) salirMacro(false)
+                guia.invalidate()
+            }
+            .setNegativeButton("Cancelar", null).show()
+    }
+
+    // ---------- Macro automática ----------
+    // Con 1× y el enfoque topando en su distancia mínima por 1 s → pasa a 0,6× (el gran angular enfoca más cerca).
+    // Si la app hizo el cambio y el objeto vuelve a estar lejos por 1,5 s → regresa a 1×.
+
+    private val vigiaMacro = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, res: TotalCaptureResult) {
+            if (!optMacro || enfoqueManual || bloqueado || dioptriasMin <= 0f || zoomMin > 0.95f) { macroDesde = 0L; return }
+            val d = res.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: return
+            val ahora = SystemClock.uptimeMillis()
+            if (ahora < macroPausa) { macroDesde = 0L; return }
+            val cond = if (!macroAuto) zoomActual in 0.95f..1.3f && d >= 0.9f * dioptriasMin
+                       else zoomActual < 0.95f && d < 0.6f * dioptriasMin
+            if (!cond) { macroDesde = 0L; return }
+            if (macroDesde == 0L) { macroDesde = ahora; return }
+            if (ahora - macroDesde >= if (macroAuto) 1500 else 1000) {
+                macroDesde = 0L; macroPausa = ahora + 2000
+                runOnUiThread { if (macroAuto) salirMacro(false) else entrarMacro() }
+            }
+        }
+    }
+
+    private fun entrarMacro() {
+        val c = camara ?: return
+        macroAuto = true
+        c.cameraControl.setZoomRatio(zoomMin)
+        if (!bloqueado) mostrarAviso("Macro 0,6× · tocar aquí para volver a 1×")
+    }
+
+    private fun salirMacro(manual: Boolean) {
+        macroAuto = false
+        if (manual) macroPausa = SystemClock.uptimeMillis() + 8000
+        camara?.cameraControl?.setZoomRatio(1f)
+        if (!bloqueado) txtAviso.visibility = View.GONE
+    }
+
+    /** Cuadrícula de tercios y nivel de horizonte dibujados sobre el área de la foto (no recibe toques). */
+    private inner class Guia : View(this@CamaraActivity) {
+        private val linea = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(110, 255, 255, 255); strokeWidth = dp(1).toFloat() }
+        private val nivel = Paint(Paint.ANTI_ALIAS_FLAG).apply { strokeWidth = dp(3).toFloat(); strokeCap = Paint.Cap.ROUND }
+        override fun onDraw(cv: Canvas) {
+            val a = areaFoto()
+            if (optGrilla) for (k in 1..2) {
+                val x = a.left + a.width() * k / 3; val y = a.top + a.height() * k / 3
+                cv.drawLine(x, a.top, x, a.bottom, linea); cv.drawLine(a.left, y, a.right, y, linea)
+            }
+            if (!optNivel || !hayGravedad) return
+            val n = Math.sqrt((g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).toDouble()).toFloat()
+            if (n < 1f || Math.abs(g[2]) > 0.8f * n) return          // teléfono casi plano: el nivel no aplica
+            val ang = Math.toDegrees(Math.atan2(g[0].toDouble(), g[1].toDouble()))
+            val desvio = ((ang % 90 + 135) % 90) - 45                  // -45…45 respecto a la orientación más cercana
+            val ok = Math.abs(desvio) < 1.0
+            // dirección del horizonte en pantalla: perpendicular a "arriba" = (gx, -gy)
+            val h = Math.hypot(g[0].toDouble(), g[1].toDouble()).toFloat()
+            val dx = g[1] / h; val dy = g[0] / h
+            val L = a.width() * 0.22f; val cx = a.centerX(); val cy = a.centerY()
+            nivel.color = if (ok) Color.parseColor("#3DDC84") else Color.WHITE
+            nivel.setShadowLayer(dp(2).toFloat(), 0f, 0f, Color.BLACK)
+            cv.drawLine(cx - dx * L, cy - dy * L, cx + dx * L, cy + dy * L, nivel)
+            // marcas fijas de referencia a los lados
+            nivel.color = if (ok) Color.parseColor("#3DDC84") else acento
+            val m = dp(14).toFloat()
+            if (Math.abs(dx) >= Math.abs(dy)) {
+                cv.drawLine(cx - L - m * 2, cy, cx - L - m, cy, nivel); cv.drawLine(cx + L + m, cy, cx + L + m * 2, cy, nivel)
+            } else {
+                cv.drawLine(cx, cy - L - m * 2, cx, cy - L - m, nivel); cv.drawLine(cx, cy + L + m, cx, cy + L + m * 2, nivel)
+            }
+        }
     }
 
     private fun mp(z: Size): String {
@@ -826,9 +1125,28 @@ class CamaraActivity : AppCompatActivity() {
     }
 
     private fun disparar() {
-        val cap = captura ?: return
-        if (ocupado) return
+        if (captura == null || ocupado) return
         ocupado = true
+        if (!optEstab || giro == null) { capturar(); return }
+        val inicio = SystemClock.uptimeMillis()
+        var avisado = false
+        val espera = object : Runnable {
+            override fun run() {
+                val ahora = SystemClock.uptimeMillis()
+                val quieto = ahora - ultimoMovimiento >= 150
+                if (quieto || ahora - inicio > 1500) {
+                    if (avisado && !bloqueado && !macroAuto) txtAviso.visibility = View.GONE
+                    capturar(); return
+                }
+                if (!avisado && ahora - inicio > 120) { avisado = true; mostrarAviso("Mantén quieto…") }
+                manejador.postDelayed(this, 25)
+            }
+        }
+        espera.run()
+    }
+
+    private fun capturar() {
+        val cap = captura ?: run { ocupado = false; return }
         val ruta = rutas[indice]
         val pre = "${codigos[indice]}_${modo}_"
         val existentes = nombresEn(ruta)
@@ -848,7 +1166,7 @@ class CamaraActivity : AppCompatActivity() {
             override fun onImageSaved(r: ImageCapture.OutputFileResults) {
                 ocupado = false
                 fotosTomadas++
-                ultimaUri = r.savedUri; ultimoNombre = nombre
+                ultimaUri = r.savedUri; ultimoNombre = nombre; ultimaRuta = ruta; ultimaEstrella = false
                 refrescar()
                 aviso("${codigos[indice]} · ${if (modo == "general") "General" else "Detalle"} $k")
                 val u = r.savedUri ?: return
@@ -882,7 +1200,8 @@ class CamaraActivity : AppCompatActivity() {
             .setNegativeButton("Eliminar") { _, _ ->
                 if (runCatching { contentResolver.delete(u, null, null) > 0 }.getOrDefault(false)) {
                     fotosTomadas = maxOf(0, fotosTomadas - 1)
-                    ultimaUri = null; ultimoNombre = ""
+                    Informe.quitar(contentResolver, ultimaRuta, ultimoNombre)
+                    ultimaUri = null; ultimoNombre = ""; ultimaEstrella = false
                     miniatura.setImageDrawable(null)
                     aviso("Foto eliminada"); refrescar()
                 } else aviso("No se pudo eliminar")
