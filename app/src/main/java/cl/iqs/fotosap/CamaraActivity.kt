@@ -38,7 +38,10 @@ import androidx.appcompat.app.AppCompatActivity
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCharacteristics
 import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.CaptureRequestOptions
+import android.hardware.camera2.CaptureRequest
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -66,6 +69,7 @@ import java.util.concurrent.TimeUnit
  *  - Lentes 0,6× · 1× · 3× · 5× (según lo que ofrezca el teléfono), pellizcar para zoom.
  *  - Linterna fija, tocar para enfocar y medir la luz en ese punto.
  *  - Brillo (compensación de exposición) con barra y botones − / +; se recuerda.
+ *  - Enfoque automático (por defecto) o manual con barra Cerca ↔ Lejos; al abrir la cámara vuelve a Auto.
  *  - Resolución Normal (12 MP) o Máxima; modos HDR / Noche si el teléfono los ofrece.
  *
  * Extras de entrada: "rutas", "codigos" (ej. AP01), "titulos" (ej. AP01 · Pared Frontal),
@@ -116,6 +120,15 @@ class CamaraActivity : AppCompatActivity() {
     private var brilloMin = 0
     private var brilloMax = 0
     private var brilloPaso = 0f     // EV por paso
+    private lateinit var btnEnfoque: TextView
+    private lateinit var panelEnfoque: LinearLayout
+    private lateinit var barraEnfoque: SeekBar
+    private lateinit var txtEnfoque: TextView
+    private lateinit var btnAuto: TextView
+    private var enfoqueManual = false
+    private var enfoque = 500                       // 0 = lo más cerca … PASOS_ENFOQUE = infinito
+    private var dioptriasMin = 0f                   // 1 / distancia mínima en metros (0 = foco fijo)
+    private val PASOS_ENFOQUE = 1000
     private lateinit var destello: View
     private lateinit var anilloFoco: View
     private var ultimaUri: Uri? = null
@@ -241,8 +254,6 @@ class CamaraActivity : AppCompatActivity() {
         fila1.addView(textos, LinearLayout.LayoutParams(0, -2, 1f))
         btnRes = chipChico { cambiarResolucion() }
         btnExt = chipChico { cambiarExtension() }
-        btnBrillo = chipChico { alternarPanelBrillo() }.apply { visibility = View.GONE }
-        fila1.addView(btnBrillo, LinearLayout.LayoutParams(-2, dp(40)).apply { marginEnd = dp(6) })
         fila1.addView(btnRes, LinearLayout.LayoutParams(-2, dp(40)).apply { marginEnd = dp(6) })
         fila1.addView(btnExt, LinearLayout.LayoutParams(-2, dp(40)))
         arriba.addView(fila1)
@@ -268,15 +279,15 @@ class CamaraActivity : AppCompatActivity() {
             background = GradientDrawable().apply { cornerRadius = dp(26).toFloat(); setColor(panel) }
             setPadding(dp(6), dp(4), dp(6), dp(4))
         }
-        fun botonPaso(t: String, d: Int) = TextView(this).apply {
+        fun botonPaso(t: String, f: () -> Unit) = TextView(this).apply {
             text = t; textSize = 24f; typeface = medio; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
             background = RippleDrawable(ColorStateList.valueOf(Color.argb(60, 255, 255, 255)),
                 GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(gris) },
                 GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) })
-            isClickable = true; setOnClickListener { fijarBrillo(brillo + d) }
+            isClickable = true; setOnClickListener { f() }
             layoutParams = LinearLayout.LayoutParams(dp(46), dp(46))
         }
-        panelBrillo.addView(botonPaso("−", -1))
+        panelBrillo.addView(botonPaso("−") { fijarBrillo(brillo - 1) })
         barraBrillo = SeekBar(this).apply {
             progressTintList = ColorStateList.valueOf(acento); thumbTintList = ColorStateList.valueOf(acento)
             setPadding(dp(18), dp(10), dp(18), dp(10))
@@ -287,7 +298,7 @@ class CamaraActivity : AppCompatActivity() {
             })
         }
         panelBrillo.addView(barraBrillo, LinearLayout.LayoutParams(0, dp(46), 1f))
-        panelBrillo.addView(botonPaso("+", 1))
+        panelBrillo.addView(botonPaso("+") { fijarBrillo(brillo + 1) })
         txtBrillo = TextView(this).apply {
             textSize = 14f; typeface = medio; gravity = Gravity.CENTER; setTextColor(Color.WHITE); maxLines = 1
             background = fondo(gris, 20); isClickable = true
@@ -296,6 +307,46 @@ class CamaraActivity : AppCompatActivity() {
         }
         panelBrillo.addView(txtBrillo, LinearLayout.LayoutParams(dp(70), dp(46)).apply { marginStart = dp(6) })
         abajo.addView(panelBrillo, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(12), 0, dp(12), dp(8)) })
+
+        // Panel de enfoque: Auto | − barra (Cerca ↔ Lejos) + | distancia
+        panelEnfoque = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; visibility = View.GONE
+            background = GradientDrawable().apply { cornerRadius = dp(26).toFloat(); setColor(panel) }
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+        }
+        btnAuto = TextView(this).apply {
+            text = "Auto"; textSize = 14f; typeface = medio; gravity = Gravity.CENTER; maxLines = 1
+            isClickable = true; setOnClickListener { enfoqueAuto() }
+            contentDescription = "Enfoque automático"
+        }
+        panelEnfoque.addView(btnAuto, LinearLayout.LayoutParams(dp(62), dp(46)).apply { marginEnd = dp(4) })
+        val paso = PASOS_ENFOQUE / 40
+        panelEnfoque.addView(botonPaso("−") { fijarEnfoque(enfoque - paso) })
+        val columna = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        barraEnfoque = SeekBar(this).apply {
+            max = PASOS_ENFOQUE
+            progressTintList = ColorStateList.valueOf(acento); thumbTintList = ColorStateList.valueOf(acento)
+            setPadding(dp(14), dp(6), dp(14), 0)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(b: SeekBar, v: Int, deUsuario: Boolean) { if (deUsuario) fijarEnfoque(v) }
+                override fun onStartTrackingTouch(b: SeekBar) {}
+                override fun onStopTrackingTouch(b: SeekBar) {}
+            })
+        }
+        columna.addView(barraEnfoque, LinearLayout.LayoutParams(-1, dp(30)))
+        val etiquetas = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(14), 0, dp(14), 0) }
+        for ((t, g) in listOf("Cerca" to Gravity.START, "Lejos" to Gravity.END))
+            etiquetas.addView(TextView(this).apply { text = t; textSize = 11f; gravity = g; setTextColor(Color.parseColor("#C9D3DD")) },
+                LinearLayout.LayoutParams(0, -2, 1f))
+        columna.addView(etiquetas)
+        panelEnfoque.addView(columna, LinearLayout.LayoutParams(0, dp(46), 1f))
+        panelEnfoque.addView(botonPaso("+") { fijarEnfoque(enfoque + paso) })
+        txtEnfoque = TextView(this).apply {
+            textSize = 14f; typeface = medio; gravity = Gravity.CENTER; setTextColor(Color.WHITE); maxLines = 1
+            background = fondo(gris, 20)
+        }
+        panelEnfoque.addView(txtEnfoque, LinearLayout.LayoutParams(dp(70), dp(46)).apply { marginStart = dp(6) })
+        abajo.addView(panelEnfoque, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(12), 0, dp(12), dp(8)) })
 
         filaLentes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(8)) }
         abajo.addView(filaLentes)
@@ -315,6 +366,13 @@ class CamaraActivity : AppCompatActivity() {
         }
         filaDisparo.addView(miniatura, LinearLayout.LayoutParams(dp(54), dp(54)))
         filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        fun botonTexto(desc: String, f: () -> Unit) = TextView(this).apply {
+            textSize = 12f; typeface = medio; gravity = Gravity.CENTER; maxLines = 2; setLineSpacing(0f, 0.9f)
+            isClickable = true; contentDescription = desc; setOnClickListener { f() }
+        }
+        btnBrillo = botonTexto("Brillo") { alternarPanel(panelBrillo) }.apply { visibility = View.GONE }
+        filaDisparo.addView(btnBrillo, LinearLayout.LayoutParams(dp(54), dp(54)))
+        filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         val disparador = View(this).apply {
             background = RippleDrawable(ColorStateList.valueOf(Color.argb(90, 0, 0, 0)),
                 GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE); setStroke(dp(5), acento) },
@@ -323,6 +381,9 @@ class CamaraActivity : AppCompatActivity() {
             setOnClickListener { disparar() }
         }
         filaDisparo.addView(disparador, LinearLayout.LayoutParams(dp(76), dp(76)))
+        filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        btnEnfoque = botonTexto("Enfoque") { alternarPanel(panelEnfoque) }.apply { visibility = View.GONE }
+        filaDisparo.addView(btnEnfoque, LinearLayout.LayoutParams(dp(54), dp(54)))
         filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         btnLinterna = botonRedondo(R.drawable.ic_linterna, 54) { alternarLinterna() }
         filaDisparo.addView(btnLinterna)
@@ -376,9 +437,20 @@ class CamaraActivity : AppCompatActivity() {
         btnRes.text = captura?.resolutionInfo?.resolution?.let { "${mp(it)} MP" }
             ?: if (prefs.getString("cam_res", "normal") == "max") "Máx" else "12 MP"
         btnExt.text = nombreExt(extActual)
-        btnBrillo.text = "☀ " + textoEv(brillo)
-        btnBrillo.background = fondo(if (brillo != 0) acento else gris, 20)
-        btnBrillo.setTextColor(if (brillo != 0) tinta else Color.WHITE)
+        fun redondo(v: TextView, activo: Boolean) {
+            v.background = RippleDrawable(ColorStateList.valueOf(Color.argb(60, 255, 255, 255)),
+                GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (activo) acento else gris) },
+                GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) })
+            v.setTextColor(if (activo) tinta else Color.WHITE)
+        }
+        btnBrillo.text = "☀\n" + textoEv(brillo)
+        redondo(btnBrillo, brillo != 0 || panelBrillo.visibility == View.VISIBLE)
+        btnEnfoque.text = if (enfoqueManual) "MF\n" + textoDistancia() else "AF"
+        redondo(btnEnfoque, enfoqueManual || panelEnfoque.visibility == View.VISIBLE)
+        btnAuto.background = fondo(if (enfoqueManual) gris else acento, 20)
+        btnAuto.setTextColor(if (enfoqueManual) Color.WHITE else tinta)
+        txtEnfoque.text = if (enfoqueManual) textoDistancia() else "Auto"
+        barraEnfoque.progress = enfoque
         txtBrillo.text = if (brillo == 0) "0 EV" else textoEv(brillo)
         barraBrillo.max = brilloMax - brilloMin
         barraBrillo.progress = brillo - brilloMin
@@ -493,6 +565,7 @@ class CamaraActivity : AppCompatActivity() {
         val c = camara!!
         if (linterna && c.cameraInfo.hasFlashUnit()) c.cameraControl.enableTorch(true)
         prepararBrillo(c)
+        prepararEnfoque(c)
         c.cameraInfo.zoomState.observe(this) { armarLentes() }
         armarLentes()
         refrescar()
@@ -543,7 +616,8 @@ class CamaraActivity : AppCompatActivity() {
     private fun enfocar(x: Float, y: Float) {
         val c = camara ?: return
         val punto = vista.meteringPointFactory.createPoint(x, y)
-        val accion = FocusMeteringAction.Builder(punto, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+        val modos = if (enfoqueManual) FocusMeteringAction.FLAG_AE else FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+        val accion = FocusMeteringAction.Builder(punto, modos)
             .setAutoCancelDuration(5, TimeUnit.SECONDS).build()
         runCatching { c.cameraControl.startFocusAndMetering(accion) }
         // el anillo queda completo dentro de la foto aunque se toque cerca del borde
@@ -572,7 +646,7 @@ class CamaraActivity : AppCompatActivity() {
         val e = c.cameraInfo.exposureState
         if (!e.isExposureCompensationSupported) {
             brilloMin = 0; brilloMax = 0; brilloPaso = 0f
-            btnBrillo.visibility = View.GONE; panelBrillo.visibility = View.GONE
+            btnBrillo.visibility = View.GONE; panelBrillo.visibility = View.GONE; refrescar()
             return
         }
         brilloMin = e.exposureCompensationRange.lower
@@ -583,8 +657,61 @@ class CamaraActivity : AppCompatActivity() {
         if (brillo != 0) runCatching { c.cameraControl.setExposureCompensationIndex(brillo) }
     }
 
-    private fun alternarPanelBrillo() {
-        panelBrillo.visibility = if (panelBrillo.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+    /** Muestra un panel (brillo o enfoque) y cierra el otro; tocar de nuevo lo cierra. */
+    private fun alternarPanel(p: LinearLayout) {
+        val abrir = p.visibility != View.VISIBLE
+        panelBrillo.visibility = View.GONE; panelEnfoque.visibility = View.GONE
+        if (abrir) p.visibility = View.VISIBLE
+        refrescar()
+    }
+
+    /** Enfoque manual solo si la cámara informa distancia mínima de enfoque (si no, es foco fijo). */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun prepararEnfoque(c: Camera) {
+        dioptriasMin = runCatching {
+            Camera2CameraInfo.from(c.cameraInfo).getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
+        }.getOrNull() ?: 0f
+        if (dioptriasMin <= 0f || extActual != ExtensionMode.NONE) {
+            enfoqueManual = false
+            btnEnfoque.visibility = View.GONE; panelEnfoque.visibility = View.GONE
+        } else btnEnfoque.visibility = View.VISIBLE
+        aplicarEnfoque()
+        refrescar()
+    }
+
+    private fun dioptrias() = dioptriasMin * (1f - enfoque.toFloat() / PASOS_ENFOQUE)
+
+    private fun textoDistancia(): String {
+        val d = dioptrias()
+        if (d <= 0.02f) return "∞"
+        val cm = 100f / d
+        return if (cm >= 100f) "%.1f m".format(cm / 100f).replace('.', ',') else "${Math.round(cm)} cm"
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun aplicarEnfoque() {
+        val c = camara ?: return
+        val b = CaptureRequestOptions.Builder()
+        if (enfoqueManual) {
+            b.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+            b.setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, dioptrias())
+        }
+        runCatching { Camera2CameraControl.from(c.cameraControl).captureRequestOptions = b.build() }
+            .onFailure { if (enfoqueManual) { enfoqueManual = false; aviso("Este modo no permite enfoque manual") } }
+    }
+
+    private fun fijarEnfoque(v: Int) {
+        if (camara == null || dioptriasMin <= 0f) return
+        if (!enfoqueManual) runCatching { camara?.cameraControl?.cancelFocusAndMetering() }
+        enfoqueManual = true
+        enfoque = v.coerceIn(0, PASOS_ENFOQUE)
+        aplicarEnfoque(); refrescar()
+    }
+
+    private fun enfoqueAuto() {
+        enfoqueManual = false
+        aplicarEnfoque(); refrescar()
+        aviso("Enfoque automático")
     }
 
     private fun fijarBrillo(v: Int) {
