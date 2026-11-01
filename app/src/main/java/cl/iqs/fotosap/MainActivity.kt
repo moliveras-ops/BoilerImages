@@ -1378,12 +1378,14 @@ class MainActivity : AppCompatActivity() {
         var cambio = false
         var filtro = "todas"
         val nombresFiltro = listOf("todas" to "Todas", "general" to "Generales", "detalle" to "Detalles",
-            "espesores" to "Espesores", "RA" to "RA", "marcada" to "Marcadas")
+            "espesores" to "Espesores", "RA" to "RA", "marcada" to "Marcadas", "informe" to "★ Informe")
 
         fun llenar() {
             cont.removeAllViews(); filtros.removeAllViews()
             val todas = fotosDe(ruta)
-            val cuenta = todas.groupingBy { claseFoto(it.nombre) }.eachCount()
+            val estrellas = Informe.leer(contentResolver, ruta)
+            val cuenta = todas.groupingBy { claseFoto(it.nombre) }.eachCount().toMutableMap()
+            cuenta["informe"] = todas.count { it.nombre in estrellas }
             if (filtro != "todas" && (cuenta[filtro] ?: 0) == 0) filtro = "todas"
             for ((clave, nombre) in nombresFiltro) {
                 val k = if (clave == "todas") todas.size else cuenta[clave] ?: 0
@@ -1398,7 +1400,11 @@ class MainActivity : AppCompatActivity() {
                     isClickable = true; setOnClickListener { filtro = clave; llenar() }
                 })
             }
-            val fotos = if (filtro == "todas") todas else todas.filter { claseFoto(it.nombre) == filtro }.toMutableList()
+            val fotos = when (filtro) {
+                "todas" -> todas
+                "informe" -> todas.filter { it.nombre in estrellas }.toMutableList()
+                else -> todas.filter { claseFoto(it.nombre) == filtro }.toMutableList()
+            }
             if (fotos.isEmpty()) {
                 cont.addView(TextView(this).apply {
                     text = "Sin fotos"; textSize = 16f; setTextColor(Color.LTGRAY); gravity = Gravity.CENTER
@@ -1426,8 +1432,8 @@ class MainActivity : AppCompatActivity() {
                 }
                 celda.addView(iv)
                 celda.addView(TextView(this).apply {
-                    text = etiquetaFoto(f.nombre); textSize = 13f; gravity = Gravity.CENTER
-                    setTextColor(if (claseFoto(f.nombre) == "marcada") C.acento else Color.WHITE)
+                    text = (if (f.nombre in estrellas) "★ " else "") + etiquetaFoto(f.nombre); textSize = 13f; gravity = Gravity.CENTER
+                    setTextColor(if (claseFoto(f.nombre) == "marcada" || f.nombre in estrellas) C.acento else Color.WHITE)
                     setPadding(0, dp(4), 0, dp(2)); maxLines = 1
                 })
                 grid.addView(celda)
@@ -1461,10 +1467,12 @@ class MainActivity : AppCompatActivity() {
         raizV.addView(barraOscura(tituloV) { dlg.dismiss() })
         lateinit var vista: VistaZoom
         var cargaId = 0
+        var alMostrar: () -> Unit = {}
 
         fun mostrarActual() {
             val f = fotos[i]
             tituloV.text = "${etiquetaFoto(f.nombre)}   ${i + 1} / ${fotos.size}\n${f.nombre}"
+            alMostrar()
             val id = ++cargaId
             vista.poner(null)
             Thread {
@@ -1484,11 +1492,25 @@ class MainActivity : AppCompatActivity() {
 
         val fila1 = filaOscura()
         fila1.addView(accionOscura(R.drawable.ic_anterior, "Anterior") { mover(-1) })
+        lateinit var btnInf: LinearLayout
+        fun pintarInforme() {
+            val si = Informe.marcada(contentResolver, ruta, fotos[i].nombre)
+            (btnInf.getChildAt(1) as TextView).text = if (si) "★ Informe" else "☆ Informe"
+            btnInf.background = fondoRedondeado(if (si) C.acento else Color.parseColor("#1C2A3A"), 12)
+            (btnInf.getChildAt(1) as TextView).setTextColor(if (si) C.tinta else Color.WHITE)
+        }
+        btnInf = accionOscura(R.drawable.ic_listo, "Informe") {
+            val r = Informe.alternar(contentResolver, ruta, fotos[i].nombre)
+            if (r == null) aviso("No se pudo guardar la marca")
+            else { aviso(if (r) "Marcada para informe" else "Sin marca de informe"); pintarInforme(); alCambiar() }
+        }
+        alMostrar = { pintarInforme() }
         fila1.addView(accionOscura(R.drawable.ic_editar, "Marcar", C.tinta, C.acento) {
             editorMarcas(fotos[i], ruta) { nueva ->
                 fotos.add(i + 1, nueva); i++; alCambiar(); mostrarActual()
             }
         })
+        fila1.addView(btnInf)
         fila1.addView(accionOscura(R.drawable.ic_siguiente, "Siguiente") { mover(1) })
         val fila2 = filaOscura()
         fila2.addView(accionOscura(R.drawable.ic_tipo, "Tipo") {
@@ -1500,6 +1522,7 @@ class MainActivity : AppCompatActivity() {
             confirmar("¿Eliminar la foto ${f.nombre}?") {
                 val ok = runCatching { contentResolver.delete(f.uri, null, null) > 0 }.getOrDefault(false)
                 if (!ok) { aviso("No se pudo eliminar la foto"); return@confirmar }
+                Informe.quitar(contentResolver, ruta, f.nombre)
                 fotos.removeAt(i)
                 alCambiar()
                 if (fotos.isEmpty()) dlg.dismiss()
@@ -1532,8 +1555,10 @@ class MainActivity : AppCompatActivity() {
             val stemNuevo = "${pre}_${otro}_${libre(ruta, "${pre}_${otro}_%d.jpg")}"
             if (!renombrar(f.uri, "$stemNuevo.jpg")) { aviso("No se pudo cambiar el tipo"); return@confirmar }
             val stemViejo = f.nombre.removeSuffix(".jpg")
+            Informe.renombrar(contentResolver, ruta, f.nombre, "$stemNuevo.jpg")
             fotosDe(ruta).filter { it.nombre.startsWith("${stemViejo}_marcada") }.forEach {
-                renombrar(it.uri, it.nombre.replaceFirst(stemViejo, stemNuevo))
+                val nuevoM = it.nombre.replaceFirst(stemViejo, stemNuevo)
+                if (renombrar(it.uri, nuevoM)) Informe.renombrar(contentResolver, ruta, it.nombre, nuevoM)
             }
             aviso("Ahora es: ${etiquetaFoto("$stemNuevo.jpg")}")
             listo(FotoInfo(f.uri, "$stemNuevo.jpg"))
@@ -2870,11 +2895,14 @@ class MainActivity : AppCompatActivity() {
     private fun menuZip() {
         menuGrande("Exportar evento (ZIP)", listOf(
             "📦  Evento completo\nTodas las fotos, notas y Excel" to { exportarZip(false) },
-            "🖼  Solo para informe\nGenerales, marcadas, espesores y RA (sin detalles ni originales)" to { exportarZip(true) }))
+            "🖼  Solo para informe\nGenerales, marcadas, ★ informe, espesores y RA (sin detalles ni originales)" to { exportarZip(true) }))
     }
+
+    private val estrellasZip = HashMap<String, Set<String>>()
 
     private fun paraInforme(ruta: String, nombre: String): Boolean {
         if (!nombre.endsWith(".jpg", true) && !nombre.endsWith(".png", true)) return true
+        if (nombre in estrellasZip.getOrPut(ruta) { Informe.leer(contentResolver, ruta) }) return true
         if (nombre.contains("_general") || nombre.contains("_marcada")) return true
         if (ruta.contains("/Espesores/") || ruta.contains("/Originales/")) return false
         if (nombre.contains("_detalle") || nombre.startsWith("Registro_")) return false
@@ -2893,6 +2921,7 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Cancelar") { _, _ -> cancelar = true }.show()
         Thread {
             val res = runCatching {
+                estrellasZip.clear()
                 runCatching { generarExcel() }   // Excel y CSV al día dentro del ZIP
                 exportarNotas()
                 // Archivos del evento
