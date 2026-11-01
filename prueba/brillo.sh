@@ -75,7 +75,7 @@ cap guia_grilla
 adb shell input swipe $((WX/2)) $((WY*45/100)) $((WX/2)) $((WY*45/100)) 1200; sleep 1; cap bloqueo
 tap "tocar aquí para soltar" 2; cap desbloqueo
 foto; tap "marcar la última foto para informe" 2; cap estrella
-tap "=enfoque" 2; tap "=−" 1; sleep 2; cap lupa; tap "enfoque automático" 2; tap "=enfoque" 2
+tap "=−" 1; sleep 2; cap lupa; tap "enfoque automático" 2; tap "=enfoque" 2
 
 # --- Reabrir: el brillo debe recordarse ---
 adb shell input keyevent KEYCODE_BACK; sleep 2
