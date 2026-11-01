@@ -69,12 +69,21 @@ toque $((WX/2)) $((WY*45/100)) anillo_manual
 tap "enfoque automático" 2; cap enfoque_auto; echo "textos auto: $(textos)"
 foto; echo "foto AF"
 
+# --- v4.4: opciones, bloqueo AE/AF, estrella, lupa ---
+tap "opciones de cámara" 2; cap opciones; echo "textos opciones: $(textos)"; tap "=listo" 2
+cap guia_grilla
+adb shell input swipe $((WX/2)) $((WY*45/100)) $((WX/2)) $((WY*45/100)) 1200; sleep 1; cap bloqueo
+tap "tocar aquí para soltar" 2; cap desbloqueo
+foto; tap "marcar la última foto para informe" 2; cap estrella
+tap "=enfoque" 2; tap "=−" 1; sleep 2; cap lupa; tap "enfoque automático" 2; tap "=enfoque" 2
+
 # --- Reabrir: el brillo debe recordarse ---
 adb shell input keyevent KEYCODE_BACK; sleep 2
 abrir; cap reabrir; echo "textos reabrir: $(textos)"
 tap "=brillo" 2; tap "volver el brillo a 0" 2; adb shell input keyevent KEYCODE_BACK; sleep 2
 
 adb pull "/sdcard/$RUTA" $OUT/fotos >/dev/null 2>&1
+adb shell cat "\"/sdcard/${RUTA}Para informe.txt\"" > $OUT/para_informe.txt 2>&1
 ls -la $OUT/fotos/* 
 adb logcat -d > $OUT/logcat.txt
 grep -A40 "FATAL EXCEPTION" $OUT/logcat.txt > $OUT/crash.txt || echo "sin crash" > $OUT/crash.txt
