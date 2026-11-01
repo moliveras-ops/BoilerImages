@@ -279,6 +279,8 @@ class CamaraActivity : AppCompatActivity() {
     // ---------- Interfaz ----------
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    /** Botones de la fila de disparo: se achican en pantallas angostas para que quepan los seis. */
+    private fun dpF(v: Int) = dp((v * minOf(1f, resources.configuration.screenWidthDp / 400f)).toInt())
 
     private fun fondo(color: Int, radio: Int, borde: Int? = null) = RippleDrawable(
         ColorStateList.valueOf(Color.argb(60, 255, 255, 255)),
@@ -460,7 +462,7 @@ class CamaraActivity : AppCompatActivity() {
 
         val filaDisparo = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(panel); setPadding(dp(16), dp(8), dp(16), dp(10))
+            setBackgroundColor(panel); setPadding(dpF(14), dp(8), dpF(14), dp(10))
         }
         miniatura = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
@@ -471,20 +473,20 @@ class CamaraActivity : AppCompatActivity() {
             }
             setOnClickListener { revisarUltima() }
         }
-        filaDisparo.addView(miniatura, LinearLayout.LayoutParams(dp(54), dp(54)))
+        filaDisparo.addView(miniatura, LinearLayout.LayoutParams(dpF(54), dpF(54)))
         btnEstrella = TextView(this).apply {
             text = "★"; textSize = 24f; gravity = Gravity.CENTER; isClickable = true
             contentDescription = "Marcar la última foto para informe"
             setOnClickListener { alternarEstrella() }
         }
-        filaDisparo.addView(btnEstrella, LinearLayout.LayoutParams(dp(46), dp(46)).apply { marginStart = dp(6) })
+        filaDisparo.addView(btnEstrella, LinearLayout.LayoutParams(dpF(46), dpF(46)).apply { marginStart = dpF(6) })
         filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         fun botonTexto(desc: String, f: () -> Unit) = TextView(this).apply {
             textSize = 12f; typeface = medio; gravity = Gravity.CENTER; maxLines = 2; setLineSpacing(0f, 0.9f)
             isClickable = true; contentDescription = desc; setOnClickListener { f() }
         }
         btnBrillo = botonTexto("Brillo") { alternarPanel(panelBrillo) }.apply { visibility = View.GONE }
-        filaDisparo.addView(btnBrillo, LinearLayout.LayoutParams(dp(54), dp(54)))
+        filaDisparo.addView(btnBrillo, LinearLayout.LayoutParams(dpF(54), dpF(54)))
         filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         val disparador = View(this).apply {
             background = RippleDrawable(ColorStateList.valueOf(Color.argb(90, 0, 0, 0)),
@@ -493,12 +495,12 @@ class CamaraActivity : AppCompatActivity() {
             isClickable = true; contentDescription = "Tomar foto (también las teclas de volumen)"
             setOnClickListener { disparar() }
         }
-        filaDisparo.addView(disparador, LinearLayout.LayoutParams(dp(76), dp(76)))
+        filaDisparo.addView(disparador, LinearLayout.LayoutParams(dpF(76), dpF(76)))
         filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         btnEnfoque = botonTexto("Enfoque") { alternarPanel(panelEnfoque) }.apply { visibility = View.GONE }
-        filaDisparo.addView(btnEnfoque, LinearLayout.LayoutParams(dp(54), dp(54)))
+        filaDisparo.addView(btnEnfoque, LinearLayout.LayoutParams(dpF(54), dpF(54)))
         filaDisparo.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        btnLinterna = botonRedondo(R.drawable.ic_linterna, 54) { alternarLinterna() }
+        btnLinterna = botonRedondo(R.drawable.ic_linterna, 54) { alternarLinterna() }.apply { layoutParams = LinearLayout.LayoutParams(dpF(54), dpF(54)) }
         filaDisparo.addView(btnLinterna)
         abajo.addView(filaDisparo, LinearLayout.LayoutParams(-1, -2))
         raiz.addView(abajo, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
