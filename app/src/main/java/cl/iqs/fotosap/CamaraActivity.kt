@@ -88,6 +88,7 @@ import java.util.concurrent.TimeUnit
  *  - Mantener presionado sobre la imagen: bloquea brillo y enfoque (AE/AF) hasta soltarlo.
  *  - Opciones (⋮): disparo estabilizado (espera a que el teléfono esté quieto), flash al disparar,
  *    cuadrícula, nivel y macro automática (pasa al gran angular 0,6× cuando el objeto está muy cerca).
+ *  - Pendientes: "faltan X de N" en la pared y botón ⏭ para saltar a la siguiente sin completar.
  *  - ★ junto a la miniatura: marca la última foto "para informe" (archivo Para informe.txt de la carpeta).
  *  - Resolución Normal (12 MP) o Máxima; modos HDR / Noche si el teléfono los ofrece.
  *
@@ -162,6 +163,8 @@ class CamaraActivity : AppCompatActivity() {
     private lateinit var lupa: ImageView
     private lateinit var btnEstrella: TextView
     private var ultimaRuta = ""
+    private lateinit var btnPendiente: TextView
+    private var conteoRutas: Map<String, Pair<Int, Int>> = emptyMap()   // ruta → (generales, otras), como en la pantalla principal
     private var ultimaEstrella = false
 
     // sensores
@@ -374,8 +377,10 @@ class CamaraActivity : AppCompatActivity() {
         btnSiguiente = chip("") { saltar(1) }
         for (b in listOf(btnAnterior, btnGeneral, btnDetalle, btnSiguiente)) {
             b.textSize = 15f; b.setPadding(dp(4), 0, dp(4), 0); b.ellipsize = android.text.TextUtils.TruncateAt.END
-            fila2.addView(b, LinearLayout.LayoutParams(0, dp(48), 1f).apply { if (b !== btnSiguiente) marginEnd = dp(5) })
+            fila2.addView(b, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(5) })
         }
+        btnPendiente = chip("⏭") { saltarPendiente() }.apply { contentDescription = "Siguiente pendiente"; setPadding(0, 0, 0, 0) }
+        fila2.addView(btnPendiente, LinearLayout.LayoutParams(dp(50), dp(48)))
         arriba.addView(fila2)
         raiz.addView(arriba, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
 
@@ -529,7 +534,52 @@ class CamaraActivity : AppCompatActivity() {
             true
         }
         setContentView(raiz)
+        recontar()
         refrescar()
+    }
+
+    /** Fotos por carpeta de todas las singularidades del recorrido (una sola consulta). */
+    private fun recontar() {
+        var pre = rutas.reduce { a, b -> a.commonPrefixWith(b) }
+        pre = pre.substring(0, pre.lastIndexOf('/') + 1)
+        val res = HashMap<String, Pair<Int, Int>>()
+        val enRecorrido = rutas.toHashSet()
+        runCatching {
+            contentResolver.query(coleccion, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.MediaColumns.DISPLAY_NAME),
+                "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'image/%'",
+                arrayOf("$pre%"), null)?.use { c ->
+                while (c.moveToNext()) {
+                    val ruta = c.getString(0) ?: continue
+                    if (ruta !in enRecorrido) continue
+                    val nombre = c.getString(1) ?: ""
+                    if (nombre.contains("_marcada")) continue
+                    val (g, o) = res[ruta] ?: (0 to 0)
+                    res[ruta] = if (nombre.contains("_general")) (g + 1 to o) else (g to o + 1)
+                }
+            }
+        }
+        conteoRutas = res
+    }
+
+    private fun grupoDe(i: Int) = titulos[i].substringAfter(" · ", "")
+
+    /** 0 = sin fotos, 1 = incompleta, 2 = general + al menos otra foto (igual que la grilla). */
+    private fun estadoDe(i: Int): Int {
+        val (g, o) = conteoRutas[rutas[i]] ?: (0 to 0)
+        return when { g + o == 0 -> 0; g > 0 && o > 0 -> 2; else -> 1 }
+    }
+
+    private fun saltarPendiente() {
+        for (k in 1 until rutas.size + 1) {
+            val j = (indice + k) % rutas.size
+            if (estadoDe(j) != 2) {
+                indice = j; refrescar()
+                aviso(titulos[j] + if (estadoDe(j) == 0) " · sin fotos" else " · incompleta")
+                cambiarModo(if ((conteoRutas[rutas[j]]?.first ?: 0) == 0) "general" else "detalle")
+                return
+            }
+        }
+        aviso("Todas completas ✓")
     }
 
     private fun estiloChip(t: TextView, activo: Boolean) {
@@ -539,10 +589,14 @@ class CamaraActivity : AppCompatActivity() {
 
     private fun refrescar() {
         txtTitulo.text = titulos[indice]
-        val nombres = nombresEn(rutas[indice])
-        val g = nombres.count { it.contains("_general_") && !it.contains("_marcada") }
-        val d = nombres.count { it.contains("_detalle_") && !it.contains("_marcada") }
-        txtConteo.text = "Gen: $g · Det: $d" + if (fotosTomadas > 0) "  ·  $fotosTomadas en sesión" else ""
+        val (g, d) = conteoRutas[rutas[indice]] ?: (0 to 0)
+        val grupo = grupoDe(indice)
+        val delGrupo = rutas.indices.filter { grupoDe(it) == grupo }
+        val faltan = delGrupo.count { estadoDe(it) != 2 }
+        txtConteo.text = "Gen: $g · Det: $d · " + (if (faltan == 0) "pared completa ✓" else "faltan $faltan de ${delGrupo.size}") +
+            if (fotosTomadas > 0) " · $fotosTomadas en sesión" else ""
+        val hayPend = rutas.indices.any { estadoDe(it) != 2 }
+        btnPendiente.alpha = if (hayPend) 1f else 0.35f
         // solo el código; si el salto cambia de pared, se agrega la pared (en otra línea)
         fun etiqueta(j: Int): String {
             val pared = titulos[j].substringAfter(" · ")
@@ -1168,6 +1222,7 @@ class CamaraActivity : AppCompatActivity() {
             override fun onImageSaved(r: ImageCapture.OutputFileResults) {
                 ocupado = false
                 fotosTomadas++
+                recontar()
                 ultimaUri = r.savedUri; ultimoNombre = nombre; ultimaRuta = ruta; ultimaEstrella = false
                 refrescar()
                 aviso("${codigos[indice]} · ${if (modo == "general") "General" else "Detalle"} $k")
@@ -1202,6 +1257,7 @@ class CamaraActivity : AppCompatActivity() {
             .setNegativeButton("Eliminar") { _, _ ->
                 if (runCatching { contentResolver.delete(u, null, null) > 0 }.getOrDefault(false)) {
                     fotosTomadas = maxOf(0, fotosTomadas - 1)
+                    recontar()
                     Informe.quitar(contentResolver, ultimaRuta, ultimoNombre)
                     ultimaUri = null; ultimoNombre = ""; ultimaEstrella = false
                     miniatura.setImageDrawable(null)
