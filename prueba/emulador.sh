@@ -107,7 +107,7 @@ adb shell input swipe $((WX*25/100)) $((WY*40/100)) $((WX*75/100)) $((WY*40/100)
 adb shell input text "63.5"; sleep 1; tap "=Usar" 2
 adb shell input swipe $((WX*40/100)) $((WY*30/100)) $((WX*55/100)) $((WY*30/100)) 600; sleep 2; cap medida
 tap "=Guardar" 5; cap marcada_guardada
-adb shell input keyevent KEYCODE_BACK; sleep 2; adb shell input keyevent KEYCODE_BACK; sleep 2
+adb shell input keyevent KEYCODE_BACK; sleep 2
 adb shell input keyevent KEYCODE_BACK; sleep 2
 largo "t03"; cap menu_largo_t03; adb shell input keyevent KEYCODE_BACK; sleep 1
 # --- v4.8: foto de espesores con la cámara BoilerImage ---
