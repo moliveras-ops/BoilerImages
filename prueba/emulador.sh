@@ -100,8 +100,8 @@ adb shell input keyevent KEYCODE_BACK; sleep 4; cap tras_camara
 tap "t01"; sleep 2; cap menu_t01_fotos
 tap "ver fotos capturadas"; sleep 3; cap galeria
 # --- v4.8: medir con referencia en el editor ---
-b=$(buscar "=Marcar"); [ -z "$b" ] && { tap "general 1" 3; }
-adb shell input tap $((WX/2)) $((WY*30/100)); sleep 3; cap visor_v48
+
+adb shell input tap $((WX/4)) $((WY*31/100)); sleep 3; cap visor_v48
 tap "=Marcar" 3; tap "=Medir" 2
 adb shell input swipe $((WX*25/100)) $((WY*40/100)) $((WX*75/100)) $((WY*40/100)) 600; sleep 2; cap pedir_ref
 adb shell input text "63.5"; sleep 1; tap "=Usar" 2
