@@ -71,6 +71,11 @@ W=$(adb shell wm size | grep -o '[0-9]*x[0-9]*' | tail -1); WX=${W%x*}; WY=${W#*
 abajo() { adb shell input swipe $((WX/2)) $((WY*80/100)) $((WX/2)) $((WY*25/100)) 400; sleep 2; }
 
 adb shell am start -n $PKG/.MainActivity; sleep 4; cap inicio
+abajo; abajo; abajo; tap "=OneDrive" 2; abajo; cap config_onedrive
+tap "vincular carpeta de onedrive" 2; cap menu_onedrive; tap "vincular carpeta" 4; cap selector_carpeta
+adb shell input keyevent KEYCODE_BACK; sleep 2; adb shell input keyevent KEYCODE_BACK; sleep 1
+adb shell am start -n $PKG/.MainActivity; sleep 3; abajo; abajo; abajo; cap config_vuelta
+adb shell am force-stop $PKG; adb shell am start -n $PKG/.MainActivity; sleep 4
 tap "nuevo evento"; sleep 1; cap tipo_evento
 tap "inspección por elementos"; escribir "Prueba"; sleep 3; cap raiz_vacia
 
