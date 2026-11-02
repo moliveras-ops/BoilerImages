@@ -1,0 +1,1 @@
+text="AP02 · Frontal" text="Gen: 1 · Det: 0 · faltan 2 de 2 · 7 en sesión" text="2,6 MP" text="⋮" text="‹  AP01" text="General" text="Detalle" text="AP03&#10;Trasera  ›" text="⏭" text="1×" text="3×" text="5×" text="10×" text="★" text="☀&#10;+0,7" text="AF" 

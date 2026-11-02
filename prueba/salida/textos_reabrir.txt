@@ -1,0 +1,1 @@
+textos reabrir: text="AP01 · Frontal" text="Gen: 6 · Det: 0 · faltan 2 de 2" text="2,6 MP" text="⋮" text="—" text="General" text="Detalle" text="AP02  ›" text="⏭" text="1×" text="3×" text="5×" text="10×" text="★" text="☀&#10;+0,7" text="AF" 
