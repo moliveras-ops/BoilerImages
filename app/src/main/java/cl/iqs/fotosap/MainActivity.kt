@@ -52,6 +52,11 @@ class MainActivity : AppCompatActivity() {
     data class Pared(var nombre: String, var cantidad: Int)
     data class Tipo(var nombre: String, var prefijo: String, val paredes: MutableList<Pared>)
 
+    /** Elemento de una inspección por árbol (panel, tubo, nivel, pared…). */
+    class Nodo(var nombre: String, var codigo: String, val hijos: MutableList<Nodo> = mutableListOf())
+    /** Inspección por árbol: [niveles] nombra cada nivel de arriba hacia abajo (ej. Panel, Tubo). */
+    class Insp(val nodo: Nodo, val niveles: MutableList<String>)
+
     // Documents permite guardar fotos y notas .txt en la misma carpeta
     private val raiz = "Documents/BoilerImage"
     private val MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -62,6 +67,23 @@ class MainActivity : AppCompatActivity() {
     private var notaEditando: EditText? = null
 
     // Elegir archivo de respaldo para restaurar
+    /** Carpeta de la nube vinculada (OneDrive u otra app que ofrezca carpetas): el respaldo se copia ahí solo. */
+    private val vincularCarpeta = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }.onFailure { aviso("Esa carpeta no permite acceso permanente: ${it.message}"); return@registerForActivityResult }
+        val nombre = nombreCarpetaNube(uri)
+        prefs.edit().putString("nube_tree", uri.toString()).putString("nube_tree_nombre", nombre).apply()
+        val esOneDrive = esOneDrive(uri)
+        mostrar(AlertDialog.Builder(this).setTitle("Carpeta vinculada")
+            .setMessage("Los respaldos se copiarán automáticamente en:\n$nombre" +
+                (if (esOneDrive) "\n\n(OneDrive)" else "\n\nOjo: esta carpeta no parece ser de OneDrive. Se usará igual."))
+            .setPositiveButton("OK", null).create())
+        render()
+    }
+
     private val abrirRespaldo = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) restaurarDesde(uri)
     }
@@ -69,26 +91,63 @@ class MainActivity : AppCompatActivity() {
     // Respaldo automático cada vez que cambia la configuración
     private var respaldoPendiente = false
     private val alCambiarPrefs = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, clave ->
-        if (clave == null || clave.startsWith("pend") || clave == "respaldo_uri" || respaldoPendiente) return@OnSharedPreferenceChangeListener
+        if (clave == null || clave.startsWith("pend") || clave == "respaldo_uri" || clave.startsWith("nube_tree") || respaldoPendiente) return@OnSharedPreferenceChangeListener
         respaldoPendiente = true
         android.os.Handler(android.os.Looper.getMainLooper())
             .postDelayed({ respaldoPendiente = false; respaldar(false) }, 1500)
     }
 
     private val dictado = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        val txt = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        val lista = res.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS).orEmpty().filter { it.isNotBlank() }
+        val conf = res.data?.getFloatArrayExtra(RecognizerIntent.EXTRA_CONFIDENCE_SCORES)
         val et = dictadoDestino ?: notaEditando
-        if (!txt.isNullOrBlank() && et != null) {
-            if (dictadoNumero) {
-                val v = numeroDictado(txt)
-                if (v.isBlank()) aviso("No entendí un número: \"$txt\"") else et.setText(v)
-            } else {
-                val actual = et.text.toString().trimEnd()
-                et.setText(if (actual.isEmpty()) txt else "$actual $txt")
-            }
-            et.setSelection(et.text.length)
-        }
+        val numero = dictadoNumero
         dictadoDestino = null; dictadoNumero = false
+        if (lista.isEmpty() || et == null) return@registerForActivityResult
+        if (numero) {
+            val nums = lista.map { numeroDictado(corregirDictado(it, false)) }.filter { it.isNotBlank() }.distinct()
+            when {
+                nums.isEmpty() -> aviso("No entendí un número: \"${lista[0]}\"")
+                nums.size == 1 -> { et.setText(nums[0]); et.setSelection(et.text.length) }
+                else -> menuGrande("¿Qué valor dijiste?", nums.map { v ->
+                    "${v.replace('.', ',')} mm" to { et.setText(v); et.setSelection(et.text.length) } })
+            }
+            return@registerForActivityResult
+        }
+        // Comando: deshacer lo último dictado
+        if (lista.any { quitarTildes(it).trim().trimEnd('.') in setOf("borrar lo ultimo", "borrar ultimo", "borra lo ultimo") }) {
+            val (e, t) = ultimoDictado ?: run { aviso("No hay dictado que borrar"); return@registerForActivityResult }
+            if (e === et && et.text.toString().endsWith(t)) {
+                et.setText(et.text.toString().dropLast(t.length).trimEnd()); et.setSelection(et.text.length)
+                aviso("Se borró: \"${t.trim()}\"")
+            } else aviso("No hay dictado que borrar")
+            ultimoDictado = null
+            return@registerForActivityResult
+        }
+        val textos = lista.map { corregirDictado(it, true) }.filter { it.isNotBlank() }.distinct()
+        if (textos.isEmpty()) return@registerForActivityResult
+        // Si el reconocedor duda (confianza baja), se ofrecen las alternativas
+        val duda = conf != null && conf.isNotEmpty() && conf[0] in 0f..0.7f
+        if (textos.size > 1 && duda)
+            menuGrande("¿Qué dijiste?", textos.take(5).map { t -> t to { agregarDictado(et, t) } })
+        else agregarDictado(et, textos[0])
+    }
+    private var ultimoDictado: Pair<EditText, String>? = null
+
+    private fun agregarDictado(et: EditText, txt: String) {
+        val actual = et.text.toString()
+        val sep = when {
+            actual.isBlank() -> ""
+            actual.endsWith("\n") || txt.startsWith("\n") -> ""
+            else -> " "
+        }
+        // mayúscula al inicio o después de punto
+        val t = if (actual.isBlank() || actual.trimEnd().endsWith(".") || actual.endsWith("\n"))
+            txt.replaceFirstChar { it.uppercase() } else txt
+        val nuevo = actual.trimEnd(' ') + sep + t
+        val agregado = nuevo.substring(actual.trimEnd(' ').length)
+        et.setText(nuevo); et.setSelection(et.text.length)
+        ultimoDictado = et to agregado
     }
     private var dictadoDestino: EditText? = null
     private var dictadoNumero = false
@@ -115,7 +174,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().remove("pendRA").apply()
         if (d == null) return@registerForActivityResult
         if (d.optString("origen") == "terreno") enTerreno = true
-        else if (d.optInt("ti") >= 0) { enEvento = true; tipoActual = d.optInt("ti"); paredActual = d.optInt("pi") }
+        else d.optString("clave").takeIf { it.isNotEmpty() }?.let { irA(it) }
         if (res.resultCode != RESULT_OK || res.data == null) { render(); return@registerForActivityResult }
         val nombre = res.data!!.getStringExtra("nombre") ?: return@registerForActivityResult
         val resumen = res.data!!.getStringExtra("resumen") ?: ""
@@ -137,16 +196,25 @@ class MainActivity : AppCompatActivity() {
     private var plantilla: String? = null   // caldera que se está editando
     private var tipoActual = -1
     private var paredActual = -1
+    private var insps = mutableListOf<Insp>()
+    private var inspActual = -1                    // inspección por árbol abierta
+    private val nodoRuta = mutableListOf<Int>()     // camino de índices dentro de la inspección
+    /** Última carpeta tocada en una grilla: se destaca con borde naranja. */
+    private var seleccion: String?
+        get() = prefs.getString("selCelda", null)
+        set(v) { prefs.edit().putString("selCelda", v).apply() }
 
     private val camara = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val uri = prefs.getString("pendUri", null)?.let(Uri::parse)
         val modo = prefs.getString("pendModo", "") ?: ""
-        val ti = prefs.getInt("pendTipo", -1)
-        val pi = prefs.getInt("pendPared", -1)
-        val n = prefs.getInt("pendNum", -1)
+        val clave = prefs.getString("pendClave", "") ?: ""
         prefs.edit().remove("pendUri").apply()
         android.util.Log.i("BoilerImage", "camara ok=$ok modo=$modo uri=$uri")
 
+        if (modo == "nombre") {
+            if (ok && uri != null) leerNombreDe(uri, true) else uri?.let { runCatching { contentResolver.delete(it, null, null) } }
+            return@registerForActivityResult
+        }
         if (modo == "medBase" || modo == "medidor") {
             alVolverCamaraMed(modo, ok, uri)
             return@registerForActivityResult
@@ -154,12 +222,12 @@ class MainActivity : AppCompatActivity() {
 
         if (!ok) {
             uri?.let { runCatching { contentResolver.delete(it, null, null) } }
-        } else if (modo == "detalle" && ti >= 0 && pi >= 0 && n > 0) {
+        } else if (modo == "detalle" && destDe(clave) != null) {
             // Modo ráfaga: vuelve a abrir la cámara hasta que el usuario cancele
-            tomarFotoSistema(ti, pi, n, "detalle")
+            tomarFotoSistema(clave, "detalle")
             return@registerForActivityResult
         }
-        if (ti >= 0) { enEvento = true; tipoActual = ti; paredActual = pi }
+        if (clave.isNotEmpty()) irA(clave)
         render()
     }
 
@@ -181,11 +249,18 @@ class MainActivity : AppCompatActivity() {
         enTerreno = savedInstanceState?.getBoolean("enTerreno", false) ?: false
         tipoActual = savedInstanceState?.getInt("tipo", -1) ?: -1
         paredActual = savedInstanceState?.getInt("pared", -1) ?: -1
+        inspActual = savedInstanceState?.getInt("insp", -1) ?: -1
+        savedInstanceState?.getString("nodoRuta")?.split('.')?.mapNotNull { it.toIntOrNull() }?.let { nodoRuta.addAll(it) }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
                     prefs.contains("pendMed") -> descartarMedicion()
                     enTerreno -> { enTerreno = false; enEvento = false; render() }
+                    inspActual >= 0 -> {
+                        if (nodoRuta.isNotEmpty()) nodoRuta.removeAt(nodoRuta.size - 1)
+                        else { inspActual = -1; if (esElementos()) enEvento = false }
+                        render()
+                    }
                     paredActual >= 0 -> { paredActual = -1; render() }
                     tipoActual >= 0 -> { tipoActual = -1; render() }
                     plantilla != null -> cerrarPlantilla()
@@ -254,6 +329,8 @@ class MainActivity : AppCompatActivity() {
         outState.putString("plantilla", plantilla)
         outState.putInt("tipo", tipoActual)
         outState.putInt("pared", paredActual)
+        outState.putInt("insp", inspActual)
+        outState.putString("nodoRuta", nodoRuta.joinToString("."))
     }
 
     // ---------- Datos ----------
@@ -284,6 +361,7 @@ class MainActivity : AppCompatActivity() {
         val s = prefs.getString(claveTipos(), null)
             ?: (if (plantilla == null) prefs.getString("tipos", null) else null)
         tipos = desdeJson(s) ?: porDefecto()
+        insps = inspDesdeJson(prefs.getString(claveInsp(), null))
     }
 
     private fun desdeJson(s: String?): MutableList<Tipo>? {
@@ -337,6 +415,8 @@ class MainActivity : AppCompatActivity() {
     private fun render() {
         if (tipoActual !in tipos.indices) { tipoActual = -1; paredActual = -1 }
         if (tipoActual >= 0 && paredActual !in tipos[tipoActual].paredes.indices) paredActual = -1
+        if (inspActual !in insps.indices) { inspActual = -1; nodoRuta.clear() }
+        while (inspActual >= 0 && nodoRuta.isNotEmpty() && nodoEn(inspActual, nodoRuta) == null) nodoRuta.removeAt(nodoRuta.size - 1)
         when {
             prefs.contains("pendMed") -> pantallaMedicion()
             enTerreno -> pantallaTerreno()
@@ -345,6 +425,8 @@ class MainActivity : AppCompatActivity() {
             enCalderas && plantaActual != null -> pantallaPlanta(plantaActual!!)
             enCalderas -> pantallaPlantas()
             !enEvento -> pantallaEventos()
+            esElementos() && insps.isNotEmpty() -> { if (inspActual < 0) inspActual = 0; pantallaNodo() }
+            inspActual >= 0 -> pantallaNodo()
             tipoActual < 0 -> pantallaTipos()
             paredActual < 0 -> pantallaTipo(tipoActual)
             else -> pantallaPared(tipoActual, paredActual)
@@ -373,7 +455,8 @@ class MainActivity : AppCompatActivity() {
             val detalle = if (r == null) "sin fotos"
                 else "${r.first} fotos · última: ${fecha.format(Date(r.second * 1000))}"
             val marca = if (nombre == evento) "● " else ""
-            val cald = prefs.getString("caldera_$nombre", null)?.let { "\n$it" } ?: ""
+            val cald = if (esElementos(nombre)) "\nInspección por elementos"
+                       else prefs.getString("caldera_$nombre", null)?.let { "\n$it" } ?: ""
             col.addView(fila("📅 $marca$nombre\n$detalle$cald", { abrirEvento(nombre) }) { menuEvento(nombre) })
         }
         col.addView(boton("＋ Nuevo evento", Estilo.ACENTO) { nuevoEvento() })
@@ -382,10 +465,20 @@ class MainActivity : AppCompatActivity() {
             enCalderas = true; plantaActual = null; render()
         })
         col.addView(boton("💾  Respaldo y restauración") { menuRespaldo() })
+        col.addView(boton("🎤  Dictado: correcciones de palabras (${listaCorrecciones().size})") { editarCorrecciones() })
         col.addView(selector("📷", "Cámara", listOf("BoilerImage", "Teléfono"), if (camaraPropia()) 0 else 1) { i ->
             prefs.edit().putBoolean("camaraPropia", i == 0).apply()
             render()
         })
+        col.addView(selector("☁", "Nube", listOf("Google Drive", "OneDrive"), if (nube() == "onedrive") 1 else 0) { i ->
+            prefs.edit().putString("nube", if (i == 1) "onedrive" else "drive").apply()
+            render()
+        })
+        if (nube() == "onedrive") {
+            val vinc = prefs.getString("nube_tree_nombre", null)
+            col.addView(boton(if (vinc == null) "☁  Vincular carpeta de OneDrive\nLos respaldos se suben solos, sin tocar nada"
+                              else "☁  OneDrive vinculado: $vinc\nToca para cambiar o desvincular") { menuOneDrive() })
+        }
         col.addView(espacio(20))
         col.addView(texto("Carpeta en el teléfono:\nAlmacenamiento interno > $raiz", 13f))
         setContentView(scroll(col))
@@ -394,9 +487,10 @@ class MainActivity : AppCompatActivity() {
     private fun pantallaTipos() {
         title = evento
         val col = columna()
+        val conteo = contarFotos()
+        tarjetasAvance(col, conteo)
         col.addView(texto("Tipos de singularidad", 14f, true))
 
-        val conteo = contarFotos()
         val notas = todasLasNotas()
         tipos.forEachIndexed { i, t ->
             val total = t.paredes.sumOf { it.cantidad }
@@ -419,7 +513,20 @@ class MainActivity : AppCompatActivity() {
             }
         }
         col.addView(boton("＋ Agregar tipo") { agregarTipo() })
+        // Inspecciones por árbol creadas en versiones de prueba dentro de un evento de singularidades
+        if (insps.isNotEmpty()) {
+        col.addView(espacio(12))
+        col.addView(texto("Inspecciones por elementos", 14f, true))
+        insps.forEachIndexed { ii, ins ->
+            val hojas = elementosDe(ins.nodo)
+            val listos = hojas.count { (r, _) -> estado(conteo[carpetaNodo(ii, r)]) == 2 }
+            col.addView(fila("🌳 ${ins.nodo.nombre}\n$listos de ${hojas.size} elementos completos",
+                { inspActual = ii; nodoRuta.clear(); render() }, listos to hojas.size) { menuInsp(ii) })
+        }
+        }
+        col.addView(espacio(12))
         col.addView(boton("💾  Guardar como plantilla de caldera") { guardarComoPlantilla() })
+        col.addView(boton("📝  Resumen de notas (${notasCompiladas().size})") { verResumenNotas() })
         col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
         col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
         col.addView(espacio(16))
@@ -474,12 +581,12 @@ class MainActivity : AppCompatActivity() {
                 stateListAnimator = null; elevation = 0f
                 val est = estado(info)
                 setTextColor(if (est == 0) C.tinta else Color.WHITE)
-                background = when (est) {
-                    2 -> fondoRedondeado(C.ok, 12)
-                    1 -> fondoRedondeado(C.parcial, 12)
-                    else -> fondoRedondeado(C.superficie, 12, C.borde)
-                }
-                setOnClickListener { menuSingularidad(ti, pi, n, info) }
+                val clave = claveSing(ti, pi, n)
+                tag = clave
+                val pintar = { fondoCelda(est, null, clave == seleccion) }
+                setTag(R.id.pintarCelda, pintar)
+                background = pintar()
+                setOnClickListener { seleccionar(this, clave); menuElemento(clave) }
                 layoutParams = GridLayout.LayoutParams().apply {
                     width = 0; height = dp(84)
                     columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
@@ -552,12 +659,18 @@ class MainActivity : AppCompatActivity() {
         guardarEventos(eventosGuardados() + nombre)
         plantilla = null; enCalderas = false; plantaActual = null
         cargar()
-        enEvento = true; tipoActual = -1; paredActual = -1
+        enEvento = true; tipoActual = -1; paredActual = -1; inspActual = -1; nodoRuta.clear()
+        if (esElementos()) {
+            if (insps.isEmpty()) { insps.add(Insp(Nodo(nombre, sugerirCodigo(nombre)), mutableListOf())); guardarInsp() }
+            inspActual = 0
+        }
         render()
     }
 
     private fun nuevoEvento() {
-        crearEvento { abrirEvento(it) }
+        menuGrande("Nuevo evento — ¿qué vas a inspeccionar?", listOf(
+            "🔥  Singularidades de caldera\nAires, quemadores, boquillas (con plantillas de planta y caldera)" to { crearEvento { abrirEvento(it) } },
+            "🌳  Inspección por elementos\nTú creas las carpetas: paneles, tubos, niveles…" to { crearEventoElementos() }))
     }
 
     private fun menuEvento(nombre: String) {
@@ -598,7 +711,8 @@ class MainActivity : AppCompatActivity() {
                 "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?", arrayOf("$raiz/$nombre/%"))
         } catch (e: Exception) { 0 }
         guardarEventos(eventosGuardados().filter { it != nombre })
-        prefs.edit().remove("terreno_$nombre").remove("med_$nombre").remove("tipos_$nombre").remove("caldera_$nombre").apply()
+        prefs.edit().remove("terreno_$nombre").remove("med_$nombre").remove("tipos_$nombre").remove("caldera_$nombre")
+            .remove("insp_$nombre").remove("cond_$nombre").remove("tipoEv_$nombre").apply()
         val quedan = resumenEventos()[nombre]?.first ?: 0
         if (quedan > 0)
             aviso("Se borraron $borradas fotos. Quedan $quedan que la app no puede borrar: elimínalas desde Mis archivos.")
@@ -607,7 +721,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun agregarTipo() {
-        dialogoTexto("Nombre del tipo (ej. Aires Secundarios)", "") { nombre ->
+        pedirNombre("Nombre del tipo (ej. Aires Secundarios)", "") { nombre ->
             dialogoTexto("Prefijo corto (ej. AS)", nombre.take(2).uppercase()) { pref ->
                 tipos.add(Tipo(limpiar(nombre), limpiar(pref), cuatro(10)))
                 guardar(); render()
@@ -620,7 +734,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this).setTitle(t.nombre)
             .setItems(arrayOf("Renombrar", "Cambiar prefijo", "Subir", "Bajar", "Eliminar")) { _, w ->
                 when (w) {
-                    0 -> dialogoTexto("Nuevo nombre", t.nombre) { t.nombre = limpiar(it); guardar(); render() }
+                    0 -> pedirNombre("Nuevo nombre", t.nombre) { t.nombre = limpiar(it); guardar(); render() }
                     1 -> dialogoTexto("Nuevo prefijo", t.prefijo) { t.prefijo = limpiar(it); guardar(); render() }
                     2 -> { tipos.mover(ti, -1); guardar(); render() }
                     3 -> { tipos.mover(ti, 1); guardar(); render() }
@@ -632,7 +746,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun agregarPared(ti: Int) {
-        dialogoTexto("Nombre de la pared", "Pared ") { nombre ->
+        pedirNombre("Nombre de la pared", "Pared ") { nombre ->
             dialogoTexto("Cantidad de singularidades", "10", true) { c ->
                 val n = c.toIntOrNull()
                 if (n != null && n in 1..300) {
@@ -653,7 +767,7 @@ class MainActivity : AppCompatActivity() {
                         if (n != null && n in 1..300) { p.cantidad = n; guardar(); render() }
                         else aviso("Cantidad entre 1 y 300")
                     }
-                    1 -> dialogoTexto("Nuevo nombre", p.nombre) { p.nombre = limpiar(it); guardar(); render() }
+                    1 -> pedirNombre("Nuevo nombre", p.nombre) { p.nombre = limpiar(it); guardar(); render() }
                     2 -> { lista.mover(pi, -1); guardar(); render() }
                     3 -> { lista.mover(pi, 1); guardar(); render() }
                     4 -> confirmar("¿Eliminar ${p.nombre}? Las fotos ya tomadas no se borran.") {
@@ -663,69 +777,551 @@ class MainActivity : AppCompatActivity() {
             }.show()
     }
 
-    private fun menuSingularidad(ti: Int, pi: Int, n: Int, info: Pair<Int, Int>?) {
-        val t = tipos[ti]
-        val p = t.paredes[pi]
-        val nota = leerNota(carpeta(t, p, n))
+    // ---------- Elementos: singularidades y elementos de inspecciones por árbol ----------
+    // Cada elemento se identifica con una clave: "s/<tipo>/<pared>/<n>" (singularidad) o
+    // "n/<inspección>/<i.j.k>" (elemento del árbol; camino vacío = la inspección misma).
+    // Fotos, nota, condición, espesores y RA funcionan igual para los dos.
+
+    private class Dest(val clave: String, val ruta: String, val codigo: String, val corto: String,
+                       val titulo: String, val grupo: String)
+
+    private fun claveSing(ti: Int, pi: Int, n: Int) = "s/$ti/$pi/$n"
+    private fun claveNodo(ii: Int, r: List<Int>) = "n/$ii/${r.joinToString(".")}"
+    private fun rutaDeClave(c: String) = c.split('/').getOrElse(2) { "" }.split('.').mapNotNull { it.toIntOrNull() }
+
+    private fun destDe(clave: String): Dest? {
+        val p = clave.split('/')
+        return when (p.getOrNull(0)) {
+            "s" -> {
+                val t = tipos.getOrNull(p.getOrNull(1)?.toIntOrNull() ?: -1) ?: return null
+                val pa = t.paredes.getOrNull(p.getOrNull(2)?.toIntOrNull() ?: -1) ?: return null
+                val n = p.getOrNull(3)?.toIntOrNull()?.takeIf { it in 1..pa.cantidad } ?: return null
+                val cod = "%s%02d".format(t.prefijo, n)
+                Dest(clave, carpeta(t, pa, n), cod, cod, "%s %02d — %s".format(t.prefijo, n, pa.nombre), pa.nombre)
+            }
+            "n" -> {
+                val ii = p.getOrNull(1)?.toIntOrNull() ?: return null
+                val ins = insps.getOrNull(ii) ?: return null
+                val r = rutaDeClave(clave)
+                val nodo = nodoEn(ii, r) ?: return null
+                val cad = cadena(ii, r)
+                val titulo = (listOf(ins.nodo) + cad).joinToString(" › ") { it.nombre }
+                val grupo = if (cad.size <= 1) ins.nodo.nombre else cad.dropLast(1).joinToString(" › ") { it.nombre }
+                Dest(clave, carpetaNodo(ii, r), codigoNodo(ii, r), nodo.codigo, titulo, grupo)
+            }
+            else -> null
+        }
+    }
+
+    /** Elementos entre los que se salta con ‹ › (y en la cámara): todas las singularidades del tipo,
+     *  o todos los elementos del mismo nivel de la inspección. */
+    private fun vecinos(clave: String): List<String> {
+        val p = clave.split('/')
+        val i1 = p.getOrNull(1)?.toIntOrNull() ?: return listOf(clave)
+        val l: List<String>? = when (p[0]) {
+            "s" -> tipos.getOrNull(i1)?.paredes?.flatMapIndexed { j, pa -> (1..pa.cantidad).map { claveSing(i1, j, it) } }
+            else -> {
+                val r = rutaDeClave(clave)
+                if (r.isEmpty()) null
+                else insps.getOrNull(i1)?.let { ins -> todosNodos(ins.nodo).filter { it.size == r.size }.map { claveNodo(i1, it) } }
+            }
+        }
+        return l ?: listOf(clave)
+    }
+
+    /** Deja la navegación en la pantalla donde se ve el elemento. */
+    private fun irA(clave: String) {
+        val p = clave.split('/')
+        enEvento = true; enTerreno = false
+        when (p.getOrNull(0)) {
+            "s" -> {
+                inspActual = -1; nodoRuta.clear()
+                tipoActual = p.getOrNull(1)?.toIntOrNull() ?: -1; paredActual = p.getOrNull(2)?.toIntOrNull() ?: -1
+            }
+            "n" -> {
+                tipoActual = -1; paredActual = -1
+                inspActual = p.getOrNull(1)?.toIntOrNull() ?: -1
+                val r = rutaDeClave(clave)
+                val n = nodoEn(inspActual, r)
+                nodoRuta.clear()
+                nodoRuta.addAll(if (r.isEmpty() || (n != null && n.hijos.isNotEmpty())) r else r.dropLast(1))
+            }
+        }
+    }
+
+    // Condición del elemento (OK / observación / crítico), en prefs "cond_<evento>": ruta -> código
+    private val condiciones = listOf("" to "Sin evaluar", "ok" to "OK", "obs" to "Observación", "crit" to "Crítico")
+    private fun conds(): JSONObject = runCatching { JSONObject(prefs.getString("cond_$evento", null) ?: "{}") }.getOrDefault(JSONObject())
+    private fun textoCond(c: String) = condiciones.firstOrNull { it.first == c }?.second ?: "Sin evaluar"
+    private fun ponerCond(ruta: String, c: String) {
+        val o = conds()
+        if (c.isEmpty()) o.remove(ruta) else o.put(ruta, c)
+        prefs.edit().putString("cond_$evento", o.toString()).apply()
+    }
+
+    private fun elegirCondicion(clave: String) {
+        val d = destDe(clave) ?: return
+        menuGrande("Condición — ${d.titulo}", condiciones.map { (c, t) ->
+            "🚦  $t" to { ponerCond(d.ruta, c); render(); menuElemento(clave) }
+        })
+    }
+
+    private fun menuElemento(clave: String) {
+        val d = destDe(clave) ?: return
+        val info = contarFotos()[d.ruta]
+        val nota = leerNota(d.ruta)
+        val cond = conds().optString(d.ruta)
         val col = columna()
         col.addView(texto("Generales: ${info?.first ?: 0}   ·   Detalles: ${info?.second ?: 0}", 14f))
+        if (cond.isNotEmpty()) col.addView(texto("Condición: ${textoCond(cond)}", 14f, true).apply {
+            if (cond == "crit") setTextColor(C.peligro)
+        })
         col.addView(texto(if (nota.isBlank()) "Sin nota" else "📝 $nota", 13f))
         col.addView(espacio(8))
         val dlg = AlertDialog.Builder(this)
-            .setTitle("%s %02d — %s".format(t.prefijo, n, p.nombre))
+            .setTitle(d.titulo)
             .setView(scroll(col))
             .setNegativeButton("Cerrar", null)
             .create()
         val totalFotos = (info?.first ?: 0) + (info?.second ?: 0)
         if (totalFotos > 0) col.addView(boton("🖼  Ver fotos capturadas ($totalFotos)", Estilo.PRIMARIO) {
             dlg.dismiss()
-            galeriaFotos("%s %02d — %s".format(t.prefijo, n, p.nombre), carpeta(t, p, n))
+            galeriaFotos(d.titulo, d.ruta)
         })
-        col.addView(boton("📷  Foto general") { dlg.dismiss(); tomarFoto(ti, pi, n, "general") })
-        col.addView(boton(if (camaraPropia()) "🔍  Detalles" else "🔍  Detalles (ráfaga)") { dlg.dismiss(); tomarFoto(ti, pi, n, "detalle") })
-        col.addView(boton("📝  Nota (escribir o dictar)") { dlg.dismiss(); editarNota(ti, pi, n) })
-        col.addView(boton("📍  Foto con puntos de espesor") { dlg.dismiss(); medicionSingularidad(ti, pi, n) })
-        col.addView(boton("📐  Medir con realidad aumentada") { dlg.dismiss(); medirRASingularidad(ti, pi, n) })
+        col.addView(boton("📷  Foto general") { dlg.dismiss(); tomarFoto(clave, "general") })
+        col.addView(boton(if (camaraPropia()) "🔍  Detalles" else "🔍  Detalles (ráfaga)") { dlg.dismiss(); tomarFoto(clave, "detalle") })
+        col.addView(boton("📝  Nota (escribir o dictar)") { dlg.dismiss(); editarNota(clave) })
+        col.addView(boton("🚦  Condición: ${textoCond(cond)}") { dlg.dismiss(); elegirCondicion(clave) })
+        col.addView(boton("📍  Foto con puntos de espesor") { dlg.dismiss(); medicionEn(clave) })
+        col.addView(boton("📐  Medir con realidad aumentada") { dlg.dismiss(); medirRAEn(clave) })
         col.addView(texto(if (camaraPropia()) "Cámara BoilerImage: toma varias fotos seguidas, cambia General/Detalle " +
-                          "y salta a la siguiente singularidad sin salir. Las teclas de volumen disparan."
+                          "y salta al siguiente elemento sin salir. Las teclas de volumen disparan."
                           else "Ráfaga: la cámara se vuelve a abrir después de cada foto. " +
                           "Presiona Atrás en la cámara para terminar.", 12f))
-        // Saltar a la singularidad anterior / siguiente (pasa a la pared vecina en los extremos)
+        // Saltar al elemento anterior / siguiente (pasa al grupo vecino en los extremos)
+        val lista = vecinos(clave)
+        val k = lista.indexOf(clave)
         val nav = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun destino(d: Int): Pair<Int, Int>? {
-            val m = n + d
-            return when {
-                m in 1..p.cantidad -> pi to m
-                d > 0 && pi + 1 < t.paredes.size -> pi + 1 to 1
-                d < 0 && pi > 0 -> pi - 1 to t.paredes[pi - 1].cantidad
-                else -> null
-            }
-        }
-        fun etiqueta(dst: Pair<Int, Int>) = "%s%02d".format(t.prefijo, dst.second) +
-            if (dst.first != pi) "\n" + t.paredes[dst.first].nombre else ""
-        fun ir(dst: Pair<Int, Int>) {
+        fun etiqueta(dst: Dest) = dst.corto + if (dst.grupo != d.grupo) "\n" + dst.grupo else ""
+        fun ir(dst: Dest) {
             dlg.dismiss()
-            window.decorView.post {
-                if (dst.first != paredActual) { paredActual = dst.first; render() }
-                val c = contarFotos()[carpeta(t, t.paredes[dst.first], dst.second)]
-                menuSingularidad(ti, dst.first, dst.second, c)
-            }
+            window.decorView.post { irA(dst.clave); render(); menuElemento(dst.clave) }
         }
-        for (d in listOf(-1, 1)) {
-            val dst = destino(d)
-            nav.addView(boton(if (dst == null) "—" else if (d < 0) "‹  ${etiqueta(dst)}" else "${etiqueta(dst)}  ›",
+        for (paso in listOf(-1, 1)) {
+            val dst = if (k < 0) null else lista.getOrNull(k + paso)?.let { destDe(it) }
+            nav.addView(boton(if (dst == null) "—" else if (paso < 0) "‹  ${etiqueta(dst)}" else "${etiqueta(dst)}  ›",
                               Estilo.PLANO) { dst?.let { ir(it) } }.apply {
                 isEnabled = dst != null; alpha = if (dst == null) 0.35f else 1f
                 gravity = Gravity.CENTER; textSize = 17f
                 setCompoundDrawablesRelative(null, null, null, null)
                 background = fondoRedondeado(C.primarioSuave, 14)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    setMargins(if (d < 0) 0 else dp(5), dp(4), if (d < 0) dp(5) else 0, dp(4))
+                    setMargins(if (paso < 0) 0 else dp(5), dp(4), if (paso < 0) dp(5) else 0, dp(4))
                 }
             })
         }
-        col.addView(nav, 2)   // arriba, visible sin desplazar
+        if (lista.size > 1) col.addView(nav, 0)   // arriba, visible sin desplazar
         dlg.show()
+    }
+
+    // ---------- Inspecciones por árbol (paneles, tubos, niveles…) ----------
+    // Cada evento tiene, además de los tipos de singularidad, inspecciones con un árbol definido
+    // por el usuario. Se guardan en prefs "insp_<evento>" (o "tplinsp_<caldera>" en la plantilla).
+    // Carpeta: <Evento>/<Inspección>/<Nodo>/<Nodo>/…  ·  fotos "SC-P01-T05_general_1.jpg".
+
+    private fun claveInsp() = plantilla?.let { "tplinsp_$it" } ?: "insp_$evento"
+
+    private fun nodoAJson(n: Nodo): JSONObject = JSONObject().put("n", n.nombre).put("c", n.codigo)
+        .put("h", JSONArray().apply { n.hijos.forEach { put(nodoAJson(it)) } })
+
+    private fun nodoDesdeJson(o: JSONObject): Nodo {
+        val h = o.optJSONArray("h")
+        return Nodo(o.optString("n"), o.optString("c"), MutableList(h?.length() ?: 0) { nodoDesdeJson(h!!.getJSONObject(it)) })
+    }
+
+    private fun inspAJson(l: List<Insp>) = JSONArray().apply {
+        l.forEach { put(nodoAJson(it.nodo).put("niv", JSONArray().apply { it.niveles.forEach { nv -> put(nv) } })) }
+    }.toString()
+
+    private fun inspDesdeJson(s: String?): MutableList<Insp> = runCatching {
+        val a = JSONArray(s ?: "[]")
+        MutableList(a.length()) { i ->
+            val o = a.getJSONObject(i)
+            val nv = o.optJSONArray("niv")
+            Insp(nodoDesdeJson(o), MutableList(nv?.length() ?: 0) { nv!!.getString(it) })
+        }
+    }.getOrDefault(mutableListOf())
+
+    private fun guardarInsp() { prefs.edit().putString(claveInsp(), inspAJson(insps)).apply() }
+
+    private fun nodoEn(ii: Int, r: List<Int>): Nodo? {
+        var n = insps.getOrNull(ii)?.nodo ?: return null
+        for (i in r) n = n.hijos.getOrNull(i) ?: return null
+        return n
+    }
+
+    /** Nodos del camino (sin la raíz). */
+    private fun cadena(ii: Int, r: List<Int>): List<Nodo> {
+        val l = mutableListOf<Nodo>()
+        var n = insps.getOrNull(ii)?.nodo ?: return l
+        for (i in r) { n = n.hijos.getOrNull(i) ?: break; l.add(n) }
+        return l
+    }
+
+    // En un evento por elementos la carpeta principal es la del evento (sin subcarpeta de inspección)
+    private fun carpetaNodo(ii: Int, r: List<Int>) =
+        "$raiz/$evento/" + ((if (esElementos()) emptyList<Nodo>() else listOfNotNull(insps.getOrNull(ii)?.nodo)) + cadena(ii, r))
+            .joinToString("") { it.nombre + "/" }
+
+    private fun codigoNodo(ii: Int, r: List<Int>): String {
+        val cad = cadena(ii, r)
+        val l = if (esElementos() && cad.isNotEmpty()) cad else listOfNotNull(insps.getOrNull(ii)?.nodo) + cad
+        return l.joinToString("-") { it.codigo }
+    }
+
+    /** Caminos de todos los nodos bajo [n] (sin incluirlo), en orden. */
+    private fun todosNodos(n: Nodo, base: List<Int> = emptyList()): List<List<Int>> =
+        n.hijos.flatMapIndexed { i, h -> val r = base + i; listOf(r) + todosNodos(h, r) }
+
+    /** Elementos finales (sin hijos) bajo [n]; si no tiene hijos, él mismo. */
+    private fun elementosDe(n: Nodo, base: List<Int> = emptyList()): List<Pair<List<Int>, Nodo>> =
+        if (n.hijos.isEmpty()) listOf(base to n) else n.hijos.flatMapIndexed { i, h -> elementosDe(h, base + i) }
+
+    private fun profundidad(n: Nodo): Int = if (n.hijos.isEmpty()) 0 else 1 + n.hijos.maxOf { profundidad(it) }
+
+    private fun codigoLimpio(s: String) = s.filter { it.isLetterOrDigit() || it in "+-." }.take(12).ifEmpty { "X" }
+
+    private fun sugerirCodigo(nombre: String): String {
+        val palabras = nombre.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val letras = palabras.filter { it.first().isLetter() }.joinToString("") { it.first().uppercase() }
+        return codigoLimpio(letras + nombre.filter { it.isDigit() })
+    }
+
+    private fun copiaNodo(n: Nodo): Nodo = Nodo(n.nombre, n.codigo, n.hijos.map { copiaNodo(it) }.toMutableList())
+
+    /** El nombre de la inspección es una carpeta del evento: no puede chocar con otra. */
+    private fun nombreInspLibre(nombre: String, excepto: Int = -1) =
+        tipos.none { it.nombre.equals(nombre, true) } && !nombre.equals("Notas en terreno", true) &&
+        insps.withIndex().none { (i, x) -> i != excepto && x.nodo.nombre.equals(nombre, true) }
+
+    // ---------- Nombre de carpeta: escrito o leído desde una imagen (reconocimiento de texto) ----------
+
+    private var trasNombre: ((String) -> Unit)? = null
+    private var tituloNombre = ""
+    private val elegirImagenNombre = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) leerNombreDe(uri, false)
+    }
+
+    /** Pide un nombre: escribirlo, o leerlo desde una foto nueva o una imagen de la galería. */
+    private fun pedirNombre(titulo: String, inicial: String, ok: (String) -> Unit) {
+        menuGrande(titulo, listOf(
+            "⌨️  Escribir el nombre" to { dialogoTexto(titulo, inicial) { ok(it) } },
+            "📷  Leerlo desde una foto\nApunta a la placa, marca o rótulo" to {
+                trasNombre = ok; tituloNombre = titulo
+                buscarArchivo("$raiz/", "Lectura nombre.jpg")?.let { runCatching { contentResolver.delete(it, null, null) } }
+                val u = crearImagen("$raiz/", "Lectura nombre.jpg")
+                if (u == null) aviso("No se pudo crear el archivo") else lanzarCamara(u, "nombre")
+            },
+            "🖼  Leerlo desde una imagen de la galería" to {
+                trasNombre = ok; tituloNombre = titulo
+                runCatching { elegirImagenNombre.launch("image/*") }.onFailure { aviso("No hay galería disponible") }
+            }))
+    }
+
+    /** Reconoce el texto de la imagen (prueba también girada) y ofrece las líneas, la más grande primero. */
+    private fun leerNombreDe(uri: Uri, borrar: Boolean) {
+        val espera = AlertDialog.Builder(this).setMessage("Leyendo el texto de la imagen…").setCancelable(false).show()
+        fun fin(lineas: List<String>) {
+            runCatching { espera.dismiss() }
+            if (borrar) runCatching { contentResolver.delete(uri, null, null) }
+            val ok = trasNombre ?: return
+            val titulo = tituloNombre
+            if (lineas.isEmpty()) { aviso("No se encontró texto: escríbelo"); dialogoTexto(titulo, "") { ok(it) }; return }
+            menuGrande("Texto encontrado — toca el nombre", lineas.take(12).map { l ->
+                l to { dialogoTexto("Revisa o corrige el nombre", l) { ok(it) } }
+            } + ("⌨️  Escribir otro" to { dialogoTexto(titulo, "") { ok(it) } }))
+        }
+        val bmp = runCatching { cargarBitmap(uri, 2000) }.getOrNull() ?: run { fin(emptyList()); return }
+        val cliente = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        val giros = listOf(0, 90, 270)
+        fun intentar(i: Int) {
+            if (i >= giros.size) { fin(emptyList()); return }
+            cliente.process(InputImage.fromBitmap(bmp, giros[i]))
+                .addOnSuccessListener { t ->
+                    val lineas = t.textBlocks.flatMap { it.lines }
+                        .sortedByDescending { it.boundingBox?.height() ?: 0 }
+                        .map { it.text.trim() }.filter { it.isNotBlank() }.distinct()
+                    // además, cada bloque completo en una línea (ej. "PANEL" + "12")
+                    val bloques = t.textBlocks.filter { it.lines.size > 1 }.map { it.text.replace('\n', ' ').trim() }
+                    val todas = (lineas + bloques).distinct()
+                    if (todas.isNotEmpty()) fin(todas) else intentar(i + 1)
+                }
+                .addOnFailureListener { intentar(i + 1) }
+        }
+        intentar(0)
+    }
+
+    /** Evento de inspección por elementos (carpetas libres, sin singularidades ni plantillas). */
+    private fun esElementos(ev: String = evento) = prefs.getString("tipoEv_$ev", "") == "elem"
+
+    private fun crearEventoElementos() {
+        dialogoTexto("Nombre del evento (ej. Paneles Nueva Aldea)", "") { n0 ->
+            val nombre = limpiar(n0)
+            if (nombre in eventosGuardados() || prefs.contains("tipos_$nombre")) { aviso("Ya existe \"$nombre\""); return@dialogoTexto }
+            prefs.edit().putString("tipoEv_$nombre", "elem").putString("tipos_$nombre", "[]")
+                .putString("insp_$nombre", inspAJson(listOf(Insp(Nodo(nombre, sugerirCodigo(nombre)), mutableListOf()))))
+                .apply()
+            abrirEvento(nombre)
+        }
+    }
+
+    private fun pantallaNodo() {
+        val ii = inspActual
+        val ins = insps[ii]
+        val r = nodoRuta.toList()
+        val nodo = nodoEn(ii, r) ?: return
+        val prof = r.size
+        val elem = esElementos()
+        title = nodo.nombre
+        val col = columna()
+        if (prof > 0) col.addView(texto((listOf(ins.nodo) + cadena(ii, r)).joinToString(" › ") { it.nombre }, 13f))
+
+        val conteo = contarFotos()
+        if (prof == 0 && elem) tarjetasAvance(col, conteo)
+        val conNota = carpetasConNota()
+        val cs = conds()
+        val clave = claveNodo(ii, r)
+        val ruta = carpetaNodo(ii, r)
+        val tot = conteo[ruta]?.let { it.first + it.second } ?: 0
+        val det = listOfNotNull(if (tot == 1) "1 foto" else "$tot fotos",
+            cs.optString(ruta).takeIf { it.isNotEmpty() }?.let { textoCond(it) }).joinToString(" · ")
+        col.addView(fila("📷 Fotos y registros\n$det · general, detalles, espesores, RA", { menuElemento(clave) }) {
+            if (prof == 0) menuInsp(ii) else menuNodo(ii, r)
+        })
+        val nota = if (ruta in conNota) leerNota(ruta) else ""
+        col.addView(fila("📝 Nota\n" + nota.ifBlank { "Sin nota — toca para escribir o dictar" }.take(200),
+            { editarNota(clave) }) { editarNota(clave) })
+
+        // Subcarpetas: las que tienen contenido como filas; las vacías como grilla
+        col.addView(espacio(8))
+        col.addView(texto("Carpetas (${nodo.hijos.size})", 14f, true))
+        if (nodo.hijos.isEmpty()) col.addView(texto("Aún no hay carpetas. Genera una serie numerada o agrega una con nombre.", 13f))
+        nodo.hijos.forEachIndexed { i, h ->
+            if (h.hijos.isEmpty()) return@forEachIndexed
+            val rh = r + i
+            val hojas = elementosDe(h, rh)
+            val listos = hojas.count { (x, _) -> estado(conteo[carpetaNodo(ii, x)]) == 2 }
+            val criticos = (listOf(rh) + todosNodos(h, rh)).count { cs.optString(carpetaNodo(ii, it)) == "crit" }
+            col.addView(fila("📁 ${h.nombre}\n${h.hijos.size} carpeta(s) · $listos de ${hojas.size} completas" +
+                             (if (criticos > 0) " · ⚠ $criticos crítico(s)" else ""),
+                { nodoRuta.add(i); render() }, listos to hojas.size) { menuNodo(ii, rh) })
+        }
+        val hojasDirectas = nodo.hijos.withIndex().filter { it.value.hijos.isEmpty() }
+        if (hojasDirectas.isNotEmpty()) {
+            col.addView(leyenda())
+            val grid = GridLayout(this).apply { columnCount = 4 }
+            for ((i, h) in hojasDirectas) {
+                val rh = r + i
+                val rr = carpetaNodo(ii, rh)
+                val inf = conteo[rr]
+                val total = inf?.let { it.first + it.second } ?: 0
+                val c = cs.optString(rr)
+                grid.addView(Button(this).apply {
+                    val sub = (if (total == 1) "1 foto" else "$total fotos") +
+                        (when (c) { "ok" -> "\nOK"; "obs" -> "\nObs."; "crit" -> "\n⚠ Crítico"; else -> "" }) +
+                        (if (rr in conNota) "\ncon nota" else "")
+                    text = android.text.SpannableString("${h.codigo}\n$sub").apply {
+                        setSpan(android.text.style.RelativeSizeSpan(0.72f), h.codigo.length + 1, length, 0)
+                    }
+                    isAllCaps = false; typeface = medio; textSize = 15f
+                    setPadding(dp(2), dp(6), dp(2), dp(6)); maxLines = 4; minWidth = 0; minimumWidth = 0
+                    stateListAnimator = null; elevation = 0f
+                    val est = estado(inf)
+                    setTextColor(if (est == 0) C.tinta else Color.WHITE)
+                    // El naranjo queda reservado para la carpeta seleccionada; "Obs." se indica con texto
+                    val borde = if (c == "crit") C.peligro else null
+                    val clave = claveNodo(ii, rh)
+                    tag = clave
+                    val pintar = { fondoCelda(est, borde, clave == seleccion) }
+                    setTag(R.id.pintarCelda, pintar)
+                    background = pintar()
+                    setOnClickListener { seleccionar(this, clave); menuElemento(clave) }
+                    setOnLongClickListener { menuNodo(ii, rh); true }
+                    layoutParams = GridLayout.LayoutParams().apply {
+                        width = 0; height = dp(if (c.isNotEmpty() || rr in conNota) 96 else 84)
+                        columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                        setMargins(dp(4), dp(4), dp(4), dp(4))
+                    }
+                })
+            }
+            col.addView(grid)
+            col.addView(texto("Toca una carpeta para fotos y nota (o \"Abrir carpeta\" para crear subcarpetas). " +
+                              "Mantén presionado para renombrar, mover o eliminar.", 12f))
+        }
+        if (prof < 8) {
+            col.addView(boton("＋ Generar carpetas numeradas (ej. 1 a 100)", Estilo.ACENTO) { agregarSerie(ii, r) })
+            col.addView(boton("＋ Agregar carpeta con nombre") { agregarCarpeta(ii, r) })
+        }
+
+        col.addView(espacio(16))
+        if (prof == 0 && elem) {
+            col.addView(boton("📝  Resumen de notas (${notasCompiladas().size})") { verResumenNotas() })
+            col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
+            col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
+        }
+        col.addView(boton(when { prof > 0 -> "← Volver"; elem -> "← Cambiar evento"; else -> "← Volver al evento" }) {
+            if (prof > 0) nodoRuta.removeAt(nodoRuta.size - 1)
+            else { inspActual = -1; if (elem) enEvento = false }
+            render()
+        })
+        col.addView(espacio(12))
+        col.addView(texto("Carpeta: $ruta", 12f))
+        setContentView(scroll(col))
+    }
+
+    private fun menuInsp(ii: Int) {
+        val n = insps[ii].nodo
+        val ops = mutableListOf<Pair<String, () -> Unit>>(
+            "✏️  Cambiar código de las fotos (${n.codigo})" to {
+                dialogoTexto("Código que va al inicio del nombre de las fotos de esta carpeta", n.codigo) { x ->
+                    n.codigo = codigoLimpio(x); guardarInsp(); render()
+                }
+            })
+        if (!esElementos()) {
+            ops.add(0, "🌳  Abrir" to { inspActual = ii; nodoRuta.clear(); render() })
+            ops.add("✏️  Renombrar" to {
+                dialogoTexto("Nuevo nombre (las fotos ya tomadas no se mueven)", n.nombre) { x ->
+                    val nombre = limpiar(x)
+                    if (!nombreInspLibre(nombre, ii)) aviso("\"$nombre\" ya se usa en este evento")
+                    else { n.nombre = nombre; guardarInsp(); render() }
+                }
+            })
+            ops.add("🗑  Eliminar" to {
+                confirmar("¿Eliminar la inspección \"${n.nombre}\" y su árbol? Las fotos ya tomadas no se borran.") {
+                    insps.removeAt(ii)
+                    if (inspActual == ii) { inspActual = -1; nodoRuta.clear() } else if (inspActual > ii) inspActual--
+                    guardarInsp(); render()
+                }
+            })
+        }
+        menuGrande(n.nombre, ops)
+    }
+
+    private fun agregarCarpeta(ii: Int, r: List<Int>) {
+        val nodo = nodoEn(ii, r) ?: return
+        pedirNombre("Nombre de la carpeta (ej. Nivel +12 m, Pared Frontal)", "") { n0 ->
+            val nombre = limpiar(n0)
+            if (r.isEmpty() && nombre.equals("Notas en terreno", true)) { aviso("Ese nombre está reservado"); return@pedirNombre }
+            if (nodo.hijos.any { it.nombre.equals(nombre, true) }) { aviso("Ya existe \"$nombre\""); return@pedirNombre }
+            dialogoTexto("Código corto para el nombre de las fotos", sugerirCodigo(nombre)) { c ->
+                nodo.hijos.add(Nodo(nombre, codigoLimpio(c))); guardarInsp(); render()
+            }
+        }
+    }
+
+    /** Un solo diálogo: nombre base, desde, hasta y código → "Tubo 001" … "Tubo 100" (código T001…). */
+    private fun agregarSerie(ii: Int, r: List<Int>) {
+        val nodo = nodoEn(ii, r) ?: return
+        fun campo(hint: String, valor: String, numero: Boolean) = EditText(this).apply {
+            this.hint = hint; setText(valor); textSize = 18f
+            inputType = if (numero) InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        }
+        val base = campo("Nombre base (ej. Tubo, Panel)", "", false)
+        val desde = campo("Desde", "1", true)
+        val hasta = campo("Hasta", "100", true)
+        val cod = campo("Código para las fotos (ej. T)", "", false)
+        val vista = TextView(this).apply { textSize = 13f; setTextColor(C.tenue) }
+        fun ancho(y: Int) = maxOf(2, y.toString().length)
+        fun nombreBase() = base.text.toString().trim().let { if (it.isEmpty()) "" else limpiar(it) }
+        fun codigoBase(b: String) = cod.text.toString().trim().let {
+            if (it.isNotEmpty()) codigoLimpio(it) else if (b.isNotEmpty()) codigoLimpio(b.take(1).uppercase()) else ""
+        }
+        fun actualizar() {
+            val b = nombreBase(); val c = codigoBase(b)
+            val x = desde.text.toString().toIntOrNull(); val y = hasta.text.toString().toIntOrNull()
+            vista.text = if (x == null || y == null || y < x) "Revisa los números"
+                else {
+                    val f = "%0${ancho(y)}d"; val pre = if (b.isEmpty()) "" else "$b "
+                    "Se crearán ${y - x + 1} carpetas: \"$pre${f.format(x)}\" … \"$pre${f.format(y)}\"\n" +
+                    "Fotos: …${c}${f.format(x)}_general_1.jpg"
+                }
+        }
+        val w = object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) { actualizar() }
+        }
+        val col = columna()
+        for ((t, e) in listOf("Nombre base" to base, "Desde" to desde, "Hasta" to hasta, "Código (opcional)" to cod)) {
+            col.addView(texto(t, 13f, true)); col.addView(e); e.addTextChangedListener(w)
+        }
+        col.addView(vista); actualizar()
+        mostrar(AlertDialog.Builder(this).setTitle("Generar carpetas numeradas").setView(scroll(col))
+            .setPositiveButton("Generar") { _, _ ->
+                val b = nombreBase(); val c = codigoBase(b)
+                val x = desde.text.toString().toIntOrNull(); val y = hasta.text.toString().toIntOrNull()
+                if (x == null || y == null || x < 0 || y < x || y - x >= 1000) { aviso("Rango no válido (hasta 1000 por vez)"); return@setPositiveButton }
+                val f = "%0${ancho(y)}d"
+                var n = 0
+                for (k in x..y) {
+                    val num = f.format(k)
+                    val nombre = if (b.isEmpty()) num else "$b $num"
+                    if (nodo.hijos.none { it.nombre.equals(nombre, true) }) { nodo.hijos.add(Nodo(nombre, c + num)); n++ }
+                }
+                guardarInsp()
+                aviso(if (n == 0) "Ya existían todas" else "$n carpetas creadas")
+                render()
+            }
+            .setNegativeButton("Cancelar", null).create())
+    }
+
+    private fun menuNodo(ii: Int, r: List<Int>) {
+        if (r.isEmpty()) { menuInsp(ii); return }
+        val padre = nodoEn(ii, r.dropLast(1)) ?: return
+        val i = r.last()
+        val n = padre.hijos.getOrNull(i) ?: return
+        // si la pantalla actual está dentro de este nodo, se ajusta al moverlo o eliminarlo
+        val dentro = nodoRuta.size >= r.size && nodoRuta.subList(0, r.size) == r
+        fun moverA(d: Int) {
+            if (i + d !in padre.hijos.indices) return
+            padre.hijos.mover(i, d)
+            if (dentro) nodoRuta[r.size - 1] = i + d
+            guardarInsp(); render()
+        }
+        val ops = mutableListOf<Pair<String, () -> Unit>>(
+            "📁  Abrir carpeta (subcarpetas)" to { nodoRuta.clear(); nodoRuta.addAll(r); render() },
+            "📷  Fotos y registros" to { menuElemento(claveNodo(ii, r)) },
+            "✏️  Renombrar" to {
+                pedirNombre("Nuevo nombre (las fotos ya tomadas no se mueven)", n.nombre) { x ->
+                    val nombre = limpiar(x)
+                    if (padre.hijos.any { it !== n && it.nombre.equals(nombre, true) }) aviso("Ya existe \"$nombre\"")
+                    else { n.nombre = nombre; guardarInsp(); render() }
+                }
+            },
+            "✏️  Cambiar código (${n.codigo})" to {
+                dialogoTexto("Nuevo código", n.codigo) { x -> n.codigo = codigoLimpio(x); guardarInsp(); render() }
+            },
+            "↑  Subir" to { moverA(-1) },
+            "↓  Bajar" to { moverA(1) })
+        if (n.hijos.isNotEmpty() && padre.hijos.size > 1) ops.add("📁  Copiar sus subcarpetas a las demás\n${n.hijos.size} subcarpetas a las carpetas vacías de este nivel" to {
+            val destinos = padre.hijos.filter { it !== n && it.hijos.isEmpty() }
+            if (destinos.isEmpty()) aviso("Las demás ya tienen subcarpetas")
+            else confirmar("¿Copiar las ${n.hijos.size} subcarpetas de ${n.nombre} a ${destinos.size} carpeta(s) " +
+                           "vacía(s) de este nivel? Las que ya tienen subcarpetas no cambian.") {
+                destinos.forEach { d -> n.hijos.forEach { d.hijos.add(copiaNodo(it)) } }
+                guardarInsp(); aviso("Copiado a ${destinos.size}"); render()
+            }
+        })
+        ops.add("🗑  Eliminar" to {
+            val bajo = todosNodos(n).size
+            confirmar("¿Eliminar ${n.nombre}" + (if (bajo > 0) " y sus $bajo subcarpetas" else "") +
+                      "? Las fotos ya tomadas no se borran.") {
+                padre.hijos.removeAt(i)
+                if (dentro) { while (nodoRuta.size >= r.size) nodoRuta.removeAt(nodoRuta.size - 1) }
+                guardarInsp(); render()
+            }
+        })
+        menuGrande(n.nombre, ops)
     }
 
     // ---------- Vista previa de fotos ----------
@@ -810,12 +1406,14 @@ class MainActivity : AppCompatActivity() {
         var cambio = false
         var filtro = "todas"
         val nombresFiltro = listOf("todas" to "Todas", "general" to "Generales", "detalle" to "Detalles",
-            "espesores" to "Espesores", "RA" to "RA", "marcada" to "Marcadas")
+            "espesores" to "Espesores", "RA" to "RA", "marcada" to "Marcadas", "informe" to "★ Informe")
 
         fun llenar() {
             cont.removeAllViews(); filtros.removeAllViews()
             val todas = fotosDe(ruta)
-            val cuenta = todas.groupingBy { claseFoto(it.nombre) }.eachCount()
+            val estrellas = Informe.leer(contentResolver, ruta)
+            val cuenta = todas.groupingBy { claseFoto(it.nombre) }.eachCount().toMutableMap()
+            cuenta["informe"] = todas.count { it.nombre in estrellas }
             if (filtro != "todas" && (cuenta[filtro] ?: 0) == 0) filtro = "todas"
             for ((clave, nombre) in nombresFiltro) {
                 val k = if (clave == "todas") todas.size else cuenta[clave] ?: 0
@@ -830,7 +1428,11 @@ class MainActivity : AppCompatActivity() {
                     isClickable = true; setOnClickListener { filtro = clave; llenar() }
                 })
             }
-            val fotos = if (filtro == "todas") todas else todas.filter { claseFoto(it.nombre) == filtro }.toMutableList()
+            val fotos = when (filtro) {
+                "todas" -> todas
+                "informe" -> todas.filter { it.nombre in estrellas }.toMutableList()
+                else -> todas.filter { claseFoto(it.nombre) == filtro }.toMutableList()
+            }
             if (fotos.isEmpty()) {
                 cont.addView(TextView(this).apply {
                     text = "Sin fotos"; textSize = 16f; setTextColor(Color.LTGRAY); gravity = Gravity.CENTER
@@ -858,8 +1460,8 @@ class MainActivity : AppCompatActivity() {
                 }
                 celda.addView(iv)
                 celda.addView(TextView(this).apply {
-                    text = etiquetaFoto(f.nombre); textSize = 13f; gravity = Gravity.CENTER
-                    setTextColor(if (claseFoto(f.nombre) == "marcada") C.acento else Color.WHITE)
+                    text = (if (f.nombre in estrellas) "★ " else "") + etiquetaFoto(f.nombre); textSize = 13f; gravity = Gravity.CENTER
+                    setTextColor(if (claseFoto(f.nombre) == "marcada" || f.nombre in estrellas) C.acento else Color.WHITE)
                     setPadding(0, dp(4), 0, dp(2)); maxLines = 1
                 })
                 grid.addView(celda)
@@ -893,10 +1495,12 @@ class MainActivity : AppCompatActivity() {
         raizV.addView(barraOscura(tituloV) { dlg.dismiss() })
         lateinit var vista: VistaZoom
         var cargaId = 0
+        var alMostrar: () -> Unit = {}
 
         fun mostrarActual() {
             val f = fotos[i]
             tituloV.text = "${etiquetaFoto(f.nombre)}   ${i + 1} / ${fotos.size}\n${f.nombre}"
+            alMostrar()
             val id = ++cargaId
             vista.poner(null)
             Thread {
@@ -916,11 +1520,25 @@ class MainActivity : AppCompatActivity() {
 
         val fila1 = filaOscura()
         fila1.addView(accionOscura(R.drawable.ic_anterior, "Anterior") { mover(-1) })
+        lateinit var btnInf: LinearLayout
+        fun pintarInforme() {
+            val si = Informe.marcada(contentResolver, ruta, fotos[i].nombre)
+            (btnInf.getChildAt(1) as TextView).text = if (si) "★ Informe" else "☆ Informe"
+            btnInf.background = fondoRedondeado(if (si) C.acento else Color.parseColor("#1C2A3A"), 12)
+            (btnInf.getChildAt(1) as TextView).setTextColor(if (si) C.tinta else Color.WHITE)
+        }
+        btnInf = accionOscura(R.drawable.ic_listo, "Informe") {
+            val r = Informe.alternar(contentResolver, ruta, fotos[i].nombre)
+            if (r == null) aviso("No se pudo guardar la marca")
+            else { aviso(if (r) "Marcada para informe" else "Sin marca de informe"); pintarInforme(); alCambiar() }
+        }
+        alMostrar = { pintarInforme() }
         fila1.addView(accionOscura(R.drawable.ic_editar, "Marcar", C.tinta, C.acento) {
             editorMarcas(fotos[i], ruta) { nueva ->
                 fotos.add(i + 1, nueva); i++; alCambiar(); mostrarActual()
             }
         })
+        fila1.addView(btnInf)
         fila1.addView(accionOscura(R.drawable.ic_siguiente, "Siguiente") { mover(1) })
         val fila2 = filaOscura()
         fila2.addView(accionOscura(R.drawable.ic_tipo, "Tipo") {
@@ -932,6 +1550,7 @@ class MainActivity : AppCompatActivity() {
             confirmar("¿Eliminar la foto ${f.nombre}?") {
                 val ok = runCatching { contentResolver.delete(f.uri, null, null) > 0 }.getOrDefault(false)
                 if (!ok) { aviso("No se pudo eliminar la foto"); return@confirmar }
+                Informe.quitar(contentResolver, ruta, f.nombre)
                 fotos.removeAt(i)
                 alCambiar()
                 if (fotos.isEmpty()) dlg.dismiss()
@@ -964,8 +1583,10 @@ class MainActivity : AppCompatActivity() {
             val stemNuevo = "${pre}_${otro}_${libre(ruta, "${pre}_${otro}_%d.jpg")}"
             if (!renombrar(f.uri, "$stemNuevo.jpg")) { aviso("No se pudo cambiar el tipo"); return@confirmar }
             val stemViejo = f.nombre.removeSuffix(".jpg")
+            Informe.renombrar(contentResolver, ruta, f.nombre, "$stemNuevo.jpg")
             fotosDe(ruta).filter { it.nombre.startsWith("${stemViejo}_marcada") }.forEach {
-                renombrar(it.uri, it.nombre.replaceFirst(stemViejo, stemNuevo))
+                val nuevoM = it.nombre.replaceFirst(stemViejo, stemNuevo)
+                if (renombrar(it.uri, nuevoM)) Informe.renombrar(contentResolver, ruta, it.nombre, nuevoM)
             }
             aviso("Ahora es: ${etiquetaFoto("$stemNuevo.jpg")}")
             listo(FotoInfo(f.uri, "$stemNuevo.jpg"))
@@ -1263,10 +1884,9 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Notas ----------
 
-    private fun editarNota(ti: Int, pi: Int, n: Int) {
-        val t = tipos[ti]
-        val p = t.paredes[pi]
-        val ruta = carpeta(t, p, n)
+    private fun editarNota(clave: String) {
+        val d = destDe(clave) ?: return
+        val ruta = d.ruta
         val et = EditText(this).apply {
             setText(leerNota(ruta))
             minLines = 4
@@ -1280,11 +1900,12 @@ class MainActivity : AppCompatActivity() {
         col.addView(et)
         col.addView(boton("🎤  Dictar") { dictar() })
         AlertDialog.Builder(this)
-            .setTitle("Nota %s %02d — %s".format(t.prefijo, n, p.nombre))
+            .setTitle("Nota ${d.titulo}")
             .setView(col)
             .setPositiveButton("Guardar") { _, _ ->
                 guardarNota(ruta, et.text.toString().trim())
-                actualizarResumen(t, p)
+                val c = clave.split('/')
+                if (c[0] == "s") tipos.getOrNull(c[1].toInt())?.let { t -> t.paredes.getOrNull(c[2].toInt())?.let { actualizarResumen(t, it) } }
                 exportarNotas()
                 render()
             }
@@ -1296,12 +1917,120 @@ class MainActivity : AppCompatActivity() {
     /** Dictado por voz. [destino] = campo que recibe el texto; [numero] = convertir a número (espesor). */
     private fun dictar(destino: EditText? = null, numero: Boolean = false) {
         dictadoDestino = destino; dictadoNumero = numero
+        val sinRed = runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            cm.activeNetwork == null
+        }.getOrDefault(false)
         val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PROMPT, if (numero) "Dicta el espesor (ej. 18 coma 29)" else "Dicta la nota")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-CL")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "es-CL")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+            // sin señal (dentro de la caldera): usar el reconocimiento del teléfono
+            if (sinRed) putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            // más tiempo de silencio antes de cortar (pausas al pensar)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, if (numero) 1500L else 3000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, if (numero) 1500L else 3000L)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, if (numero) "Dicta el espesor (ej. 18 coma 29)"
+                else "Dicta la nota · \"punto\", \"coma\", \"nueva línea\", \"borrar lo último\"")
         }
         try { dictado.launch(i) }
         catch (e: Exception) { aviso("El dictado por voz no está disponible en este teléfono") }
+    }
+
+    private fun quitarTildes(t: String) = java.text.Normalizer.normalize(t.lowercase(Locale.ROOT), java.text.Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}"), "")
+
+    // ---------- Correcciones del dictado (editables en Configuración) ----------
+
+    private val correccionesBase = """
+        # Una por línea:  lo que entiende = lo que debe escribir
+        a pe = AP
+        cu pe = QP
+        cu ce = QC
+        be ele = BL
+        pe ge pe = PGP
+        pe de a = PDA
+        erre e erre = RER
+        u te = UT
+        ultra sonido = ultrasonido
+        milímetros = mm
+        milímetro = mm
+        sobre calentador = sobrecalentador
+        sobre calentadores = sobrecalentadores
+        de laminación = delaminación
+        termo cupla = termocupla
+        por ciento = %
+        más menos = ±
+    """.trimIndent()
+
+    private fun textoCorrecciones() = prefs.getString("dict_corr", null) ?: correccionesBase
+
+    private fun listaCorrecciones(): List<Pair<String, String>> = textoCorrecciones().lines()
+        .map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") && "=" in it }
+        .map { it.substringBefore("=").trim() to it.substringAfter("=").trim() }
+        .filter { it.first.isNotEmpty() }
+        .sortedByDescending { it.first.length }   // las frases largas primero
+
+    private fun palabra(f: String) = Regex("(?<![\\p{L}\\d])" + Regex.escape(f) + "(?![\\p{L}\\d])",
+        setOf(RegexOption.IGNORE_CASE))
+
+    /** Aplica las correcciones de vocabulario y (en notas) la puntuación dictada. */
+    private fun corregirDictado(t0: String, puntuacion: Boolean): String {
+        var t = " ${t0.trim()} "
+        for ((dice, escribe) in listaCorrecciones()) t = palabra(dice).replace(t, Regex.escapeReplacement(escribe))
+        // código + número: "AP 1" → AP01, "QP 12" → QP12
+        t = Regex("(?<![\\p{L}\\d])([A-Z]{2,4})[\\s-]*(\\d{1,3})(?![\\d,.])").replace(t) { m ->
+            m.groupValues[1] + m.groupValues[2].padStart(2, '0')
+        }
+        t = Regex("(\\d)\\s*°?\\s*grados").replace(t, "$1°")
+        if (puntuacion) {
+            fun r(f: String, x: String) { t = palabra(f).replace(t, Regex.escapeReplacement(x)) }
+            r("punto y aparte", ".\n"); r("punto aparte", ".\n"); r("nueva línea", "\n"); r("nueva linea", "\n")
+            r("punto seguido", "."); r("punto final", "."); r("dos puntos", ":")
+            t = Regex("(\\d)\\s+coma\\s+(\\d)", RegexOption.IGNORE_CASE).replace(t, "$1,$2")
+            r("coma", ",")
+            t = Regex("\\s+punto\\s*$", RegexOption.IGNORE_CASE).replace(t, ".")
+            t = t.replace(Regex("[ \\t]+([.,:;%])"), "$1")
+                .replace(Regex("([.,:;])(?=[^\\s\\d])"), "$1 ")
+                .replace(Regex("[ \\t]*\\n[ \\t]*"), "\n")
+                .replace(Regex("\\.\\s+(\\p{Ll})")) { ". " + it.groupValues[1].uppercase() }
+                .replace(Regex("\\n(\\p{Ll})")) { "\n" + it.groupValues[1].uppercase() }
+        }
+        return t.replace(Regex("[ \\t]{2,}"), " ").trim(' ')
+    }
+
+    private fun editarCorrecciones() {
+        val et = EditText(this).apply {
+            setText(textoCorrecciones()); textSize = 16f; minLines = 10
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        val col = columna()
+        col.addView(texto("Cuando el dictado entienda mal una palabra, agrégala aquí:\n" +
+                          "lo que entiende = lo que debe escribir (ej.  sobre calentador = sobrecalentador).\n" +
+                          "Comandos en notas: \"punto\", \"coma\", \"punto y aparte\", \"nueva línea\", \"dos puntos\", " +
+                          "\"borrar lo último\". \"AP 1\" se escribe AP01.", 13f))
+        col.addView(et)
+        col.addView(boton("🧪  Probar con la voz") {
+            dictar(object : EditText(this) {
+                override fun setText(text: CharSequence?, type: android.widget.TextView.BufferType?) {
+                    super.setText(text, type)
+                    if (!text.isNullOrEmpty()) aviso("Resultado: $text")
+                }
+            })
+        })
+        mostrar(AlertDialog.Builder(this).setTitle("Dictado — correcciones").setView(scroll(col))
+            .setPositiveButton("Guardar") { _, _ ->
+                prefs.edit().putString("dict_corr", et.text.toString()).apply()
+                aviso("${listaCorrecciones().size} correcciones guardadas"); render()
+            }
+            .setNeutralButton("Restablecer") { _, _ ->
+                confirmar("¿Volver a la lista de correcciones original?") {
+                    prefs.edit().remove("dict_corr").apply(); render()
+                }
+            }
+            .setNegativeButton("Cancelar", null).create())
     }
 
     private val palabrasNum = mapOf(
@@ -1438,7 +2167,7 @@ class MainActivity : AppCompatActivity() {
         o.put("app", "BoilerImage").put("version", 1).put("fecha", System.currentTimeMillis())
         val datos = JSONObject()
         for ((k, v) in prefs.all) {
-            if (k.startsWith("pend") || k == "respaldo_uri" || v == null) continue
+            if (k.startsWith("pend") || k == "respaldo_uri" || k.startsWith("nube_tree") || v == null) continue
             val t = when (v) {
                 is String -> "s"; is Int -> "i"; is Long -> "l"; is Boolean -> "b"; is Float -> "f"
                 else -> continue
@@ -1519,7 +2248,7 @@ class MainActivity : AppCompatActivity() {
             prefs.registerOnSharedPreferenceChangeListener(alCambiarPrefs)
             migrarCalderas()
             plantilla = null; plantaActual = null; enCalderas = false; enTerreno = false
-            enEvento = false; tipoActual = -1; paredActual = -1
+            enEvento = false; tipoActual = -1; paredActual = -1; inspActual = -1; nodoRuta.clear()
             cargar()
             respaldar(false)
             aviso("Respaldo restaurado")
@@ -1572,7 +2301,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun resumenPlantilla(id: String): String {
         val l = desdeJson(prefs.getString("tpl_$id", null)) ?: return ""
-        return "${l.size} tipos · ${l.sumOf { t -> t.paredes.sumOf { it.cantidad } }} singularidades"
+        val ni = inspDesdeJson(prefs.getString("tplinsp_$id", null)).size
+        return "${l.size} tipos · ${l.sumOf { t -> t.paredes.sumOf { it.cantidad } }} singularidades" +
+               if (ni > 0) " · $ni inspección(es) por elementos" else ""
     }
 
     /** Nombre del evento → planta → caldera. Llama [luego] con el nombre del evento. */
@@ -1585,6 +2316,7 @@ class MainActivity : AppCompatActivity() {
                         ?: prefs.getString("tipos", null) ?: aJson(porDefecto())
                     val ed = prefs.edit().putString("tipos_$nombre", json)
                     if (id != null) ed.putString("caldera_$nombre", id)
+                    id?.let { prefs.getString("tplinsp_$it", null) }?.let { ed.putString("insp_$nombre", it) }
                     ed.apply()
                 }
                 luego(nombre)
@@ -1649,6 +2381,7 @@ class MainActivity : AppCompatActivity() {
                             if (plantaDe(id) != pl) id else {
                                 val nid = idCaldera(n, calderaDe(id))
                                 ed.putString("tpl_$nid", prefs.getString("tpl_$id", null)).remove("tpl_$id")
+                                prefs.getString("tplinsp_$id", null)?.let { ed.putString("tplinsp_$nid", it).remove("tplinsp_$id") }
                                 nid
                             }
                         }
@@ -1660,7 +2393,7 @@ class MainActivity : AppCompatActivity() {
                     2 -> confirmar("¿Eliminar la planta \"$pl\" y sus ${calderasDe(pl).size} caldera(s)? " +
                                    "Los eventos ya creados no cambian.") {
                         val ed = prefs.edit()
-                        calderasDe(pl).forEach { ed.remove("tpl_$it") }
+                        calderasDe(pl).forEach { ed.remove("tpl_$it").remove("tplinsp_$it") }
                         ed.apply()
                         guardarListaPrefs("calderas", calderas().filter { plantaDe(it) != pl })
                         guardarListaPrefs("plantas", plantas().filter { it != pl })
@@ -1703,19 +2436,23 @@ class MainActivity : AppCompatActivity() {
                         val nid = idCaldera(pl, limpiar(n0))
                         if (nid == id) return@dialogoTexto
                         if (nid in calderas()) { aviso("Ya existe esa caldera"); return@dialogoTexto }
-                        prefs.edit().putString("tpl_$nid", prefs.getString("tpl_$id", null)).remove("tpl_$id").apply()
+                        val ed = prefs.edit().putString("tpl_$nid", prefs.getString("tpl_$id", null)).remove("tpl_$id")
+                        prefs.getString("tplinsp_$id", null)?.let { ed.putString("tplinsp_$nid", it).remove("tplinsp_$id") }
+                        ed.apply()
                         guardarListaPrefs("calderas", calderas().map { if (it == id) nid else it })
                         render()
                     }
                     2 -> dialogoTexto("Nombre de la copia", "${calderaDe(id)} (copia)") { n0 ->
                         val nid = idCaldera(pl, limpiar(n0))
                         if (nid in calderas()) { aviso("Ya existe esa caldera"); return@dialogoTexto }
-                        prefs.edit().putString("tpl_$nid", prefs.getString("tpl_$id", null)).apply()
+                        val ed = prefs.edit().putString("tpl_$nid", prefs.getString("tpl_$id", null))
+                        prefs.getString("tplinsp_$id", null)?.let { ed.putString("tplinsp_$nid", it) }
+                        ed.apply()
                         guardarListaPrefs("calderas", calderas() + nid)
                         render()
                     }
                     3 -> confirmar("¿Eliminar la caldera \"${calderaDe(id)}\"? Los eventos ya creados no cambian.") {
-                        prefs.edit().remove("tpl_$id").apply()
+                        prefs.edit().remove("tpl_$id").remove("tplinsp_$id").apply()
                         guardarListaPrefs("calderas", calderas().filter { it != id })
                         render()
                     }
@@ -1725,12 +2462,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun abrirPlantilla(id: String) {
         plantilla = id; enCalderas = true; plantaActual = plantaDe(id)
-        tipoActual = -1; paredActual = -1
+        tipoActual = -1; paredActual = -1; inspActual = -1; nodoRuta.clear()
         cargar(); render()
     }
 
     private fun cerrarPlantilla() {
-        plantilla = null; tipoActual = -1; paredActual = -1
+        plantilla = null; tipoActual = -1; paredActual = -1; inspActual = -1; nodoRuta.clear()
         cargar(); render()
     }
 
@@ -1780,7 +2517,9 @@ class MainActivity : AppCompatActivity() {
             dialogoTexto("Caldera (ej. Caldera Recuperadora)", previo?.let { calderaDe(it) } ?: "") { c0 ->
                 val id = idCaldera(pl, limpiar(c0))
                 val hacer = {
-                    prefs.edit().putString("tpl_$id", aJson(tipos)).putString("caldera_$evento", id).apply()
+                    val ed = prefs.edit().putString("tpl_$id", aJson(tipos)).putString("caldera_$evento", id)
+                    ed.remove("tplinsp_$id")   // las inspecciones por elementos no van en la plantilla
+                    ed.apply()
                     guardarListaPrefs("plantas", plantas() + pl)
                     guardarListaPrefs("calderas", calderas() + id)
                     aviso("Plantilla guardada: ${plantaDe(id)} — ${calderaDe(id)}")
@@ -2014,18 +2753,157 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** "Notas <evento>.csv" en la carpeta del evento (se abre en Excel). Devuelve nº de notas. */
+    /** Notas de las inspecciones por árbol: (inspección, grupo, elemento, texto). */
+    private fun notasArbol(): List<List<String>> {
+        val conNota = carpetasConNota()
+        val res = mutableListOf<List<String>>()
+        insps.forEachIndexed { ii, ins ->
+            for (r in listOf(emptyList<Int>()) + todosNodos(ins.nodo)) {
+                val d = destDe(claveNodo(ii, r)) ?: continue
+                if (d.ruta !in conNota) continue
+                val txt = leerNota(d.ruta)
+                val nombre = nodoEn(ii, r)?.nombre ?: continue
+                if (txt.isNotBlank()) res.add(listOf(ins.nodo.nombre, if (r.size <= 1) "" else d.grupo, nombre, txt))
+            }
+        }
+        return res
+    }
+
+    // ---------- Resumen de notas compilado (todo el evento, agrupado por componente) ----------
+
+    /** Nota de un componente: grupo (tipo o carpeta principal), ubicación, código, condición, texto. */
+    private class NotaComp(val grupo: String, val ubic: String, val cod: String, val cond: String,
+                           val texto: String, val clave: String?)
+
+    private fun notasCompiladas(): List<NotaComp> {
+        val conNota = carpetasConNota()
+        val cs = conds()
+        val res = mutableListOf<NotaComp>()
+        tipos.forEachIndexed { ti, t ->
+            t.paredes.forEachIndexed { pi, p ->
+                for (n in 1..p.cantidad) {
+                    val ruta = carpeta(t, p, n)
+                    val txt = if (ruta in conNota) leerNota(ruta) else ""
+                    val c = cs.optString(ruta)
+                    if (txt.isNotBlank() || c == "crit" || c == "obs")
+                        res.add(NotaComp(t.nombre, p.nombre, "%s%02d".format(t.prefijo, n), c, txt, "s/$ti/$pi/$n"))
+                }
+            }
+        }
+        insps.forEachIndexed { ii, ins ->
+            for (r in listOf(emptyList<Int>()) + todosNodos(ins.nodo)) {
+                val clave = claveNodo(ii, r)
+                val d = destDe(clave) ?: continue
+                val txt = if (d.ruta in conNota) leerNota(d.ruta) else ""
+                val c = cs.optString(d.ruta)
+                if (txt.isBlank() && c != "crit" && c != "obs") continue
+                val cad = cadena(ii, r)
+                val grupo = if (esElementos()) cad.firstOrNull()?.nombre ?: "Carpeta principal" else ins.nodo.nombre
+                val ubic = if (cad.isEmpty()) "(carpeta principal)" else cad.joinToString(" › ") { it.nombre }
+                res.add(NotaComp(grupo, ubic, d.codigo, c, txt, clave))
+            }
+        }
+        for (rg in registros().sortedBy { it.num }) {
+            if (rg.nota.isBlank()) continue
+            res.add(NotaComp("Notas en terreno", "Registro %02d".format(rg.num) +
+                (if (rg.valor.isNotBlank()) " · ${textoValor(rg.valor)}" else ""), "R%02d".format(rg.num), "", rg.nota, null))
+        }
+        return res
+    }
+
+    private fun lineaNota(n: NotaComp): String {
+        val cab = listOfNotNull(n.cod, n.ubic.takeIf { it.isNotBlank() && it != n.cod },
+            n.cond.takeIf { it.isNotEmpty() }?.let { textoCond(it) }).joinToString(" · ")
+        return cab + "\n" + (if (n.texto.isBlank()) "   (sin nota)" else n.texto.lines().joinToString("\n") { "   $it" })
+    }
+
+    private fun textoResumenNotas(lista: List<NotaComp>): String {
+        val sb = StringBuilder()
+        sb.append("Resumen de notas — $evento\n")
+        sb.append("Actualizado: ${SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date())}\n")
+        val crit = lista.count { it.cond == "crit" }; val obs = lista.count { it.cond == "obs" }
+        sb.append("${lista.count { it.texto.isNotBlank() }} notas · $crit crítico(s) · $obs observación(es)\n")
+        for ((g, items) in lista.groupBy { it.grupo }) {
+            sb.append("\n== $g ==\n")
+            items.forEach { sb.append(lineaNota(it)).append("\n") }
+        }
+        return sb.toString().trimEnd()
+    }
+
+    /** "Resumen notas <evento>.txt" en la carpeta del evento. */
+    private fun guardarResumenNotas(lista: List<NotaComp> = notasCompiladas()) =
+        escribirTexto("$raiz/$evento/", "Resumen notas $evento.txt", if (lista.isEmpty()) "" else textoResumenNotas(lista))
+
+    private fun verResumenNotas() {
+        val todas = notasCompiladas()
+        if (todas.isEmpty()) { aviso("Este evento aún no tiene notas"); return }
+        guardarResumenNotas(todas)
+        val col = columna()
+        val lista = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var dlg: AlertDialog? = null
+        val filtros = listOf<Pair<String, (NotaComp) -> Boolean>>(
+            "Todas" to { true }, "⚠ Críticos" to { it.cond == "crit" }, "Observación" to { it.cond == "obs" })
+        fun llenar(f: (NotaComp) -> Boolean) {
+            lista.removeAllViews()
+            val sel = todas.filter(f)
+            if (sel.isEmpty()) lista.addView(texto("Nada en este filtro.", 13f))
+            for ((g, items) in sel.groupBy { it.grupo }) {
+                lista.addView(texto("$g (${items.size})", 15f, true).apply { setPadding(0, dp(12), 0, dp(4)) })
+                for (n in items) {
+                    lista.addView(texto(lineaNota(n), 14f).apply {
+                        setPadding(dp(10), dp(8), dp(10), dp(8))
+                        background = fondoRedondeado(Color.WHITE, 10,
+                            when (n.cond) { "crit" -> C.peligro; "obs" -> C.acento; else -> C.tenue }, if (n.cond == "crit") 2 else 1)
+                        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, dp(3), 0, dp(3)) }
+                        n.clave?.let { k -> setOnClickListener { dlg?.dismiss(); editarNota(k) } }
+                    })
+                }
+            }
+        }
+        val barra = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((t, f) in filtros) {
+            val cuenta = todas.count(f)
+            if (t != "Todas" && cuenta == 0) continue
+            barra.addView(Button(this).apply {
+                text = "$t ($cuenta)"; isAllCaps = false; textSize = 13f
+                setOnClickListener { llenar(f) }
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            })
+        }
+        col.addView(barra)
+        col.addView(texto("Toca una nota para editarla. También queda en \"Resumen notas $evento.txt\" en la carpeta del evento.", 12f))
+        col.addView(lista)
+        llenar { true }
+        dlg = AlertDialog.Builder(this).setTitle("Resumen de notas — $evento").setView(scroll(col))
+            .setPositiveButton("Cerrar", null)
+            .setNeutralButton("Compartir") { _, _ ->
+                val i = Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_SUBJECT, "Resumen de notas — $evento")
+                    .putExtra(Intent.EXTRA_TEXT, textoResumenNotas(todas))
+                runCatching { startActivity(Intent.createChooser(i, "Compartir resumen")) }
+                    .onFailure { aviso("No hay app para compartir") }
+            }.create()
+        mostrar(dlg)
+    }
+
+
     private fun exportarNotas(): Int {
+        runCatching { guardarResumenNotas() }
         val lista = todasLasNotas()
+        val arbol = notasArbol()
         val nombre = "Notas $evento.csv"
-        if (lista.isEmpty()) { escribirTexto("$raiz/$evento/", nombre, ""); return 0 }
+        if (lista.isEmpty() && arbol.isEmpty()) { escribirTexto("$raiz/$evento/", nombre, ""); return 0 }
         val sb = StringBuilder("﻿Tipo;Pared;Singularidad;Nota\n")
         for (nI in lista) {
             val nota = nI.texto.replace("\"", "\"\"").replace("\n", " ")
             val sing = "%s %02d".format(nI.prefijo, nI.num)
             sb.append("${nI.tipo};${nI.pared};$sing;\"$nota\"\n")
         }
+        for ((ins, grupo, elem, txt) in arbol) {
+            sb.append("$ins;$grupo;$elem;\"${txt.replace("\"", "\"\"").replace("\n", " ")}\"\n")
+        }
         escribirTexto("$raiz/$evento/", nombre, sb.toString().trimEnd())
-        return lista.size
+        return lista.size + arbol.size
     }
 
     // ---------- Exportar Excel .xlsx ----------
@@ -2045,18 +2923,22 @@ class MainActivity : AppCompatActivity() {
     private fun menuZip() {
         menuGrande("Exportar evento (ZIP)", listOf(
             "📦  Evento completo\nTodas las fotos, notas y Excel" to { exportarZip(false) },
-            "🖼  Solo para informe\nGenerales, marcadas, espesores y RA (sin detalles ni originales)" to { exportarZip(true) }))
+            "🖼  Solo para informe\nGenerales, marcadas, ★ informe, espesores y RA (sin detalles ni originales)" to { exportarZip(true) },
+            "☁  Respaldar en ${nombreNube()}\n" + (if (carpetaNube() != null) "ZIP completo, se copia solo a la carpeta vinculada" else "ZIP completo y se abre ${nombreNube()} para subirlo") to { exportarZip(false, drive = true) }))
     }
+
+    private val estrellasZip = HashMap<String, Set<String>>()
 
     private fun paraInforme(ruta: String, nombre: String): Boolean {
         if (!nombre.endsWith(".jpg", true) && !nombre.endsWith(".png", true)) return true
+        if (nombre in estrellasZip.getOrPut(ruta) { Informe.leer(contentResolver, ruta) }) return true
         if (nombre.contains("_general") || nombre.contains("_marcada")) return true
         if (ruta.contains("/Espesores/") || ruta.contains("/Originales/")) return false
         if (nombre.contains("_detalle") || nombre.startsWith("Registro_")) return false
         return true
     }
 
-    private fun exportarZip(informe: Boolean) {
+    private fun exportarZip(informe: Boolean, drive: Boolean = false) {
         val ev = evento
         val vista = TextView(this).apply { text = "Preparando…"; textSize = 16f; setPadding(dp(24), dp(20), dp(24), dp(8)) }
         val barraP = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -2068,6 +2950,7 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Cancelar") { _, _ -> cancelar = true }.show()
         Thread {
             val res = runCatching {
+                estrellasZip.clear()
                 runCatching { generarExcel() }   // Excel y CSV al día dentro del ZIP
                 exportarNotas()
                 // Archivos del evento
@@ -2088,7 +2971,8 @@ class MainActivity : AppCompatActivity() {
                 lista.sortBy { it.ruta + it.nombre }
                 val total = lista.sumOf { maxOf(it.tam, 1L) }
                 val sello = SimpleDateFormat("yyyy-MM-dd HHmm", Locale.getDefault()).format(Date())
-                val nombreZip = "BoilerImage $ev ${if (informe) "informe" else "completo"} $sello.zip"
+                val nombreZip = "BoilerImage $ev ${if (drive) "respaldo" else if (informe) "informe" else "completo"} $sello.zip"
+                if (drive) borrarRespaldosAnteriores(ev)   // queda solo el último respaldo en el teléfono
                 val uriZip = contentResolver.insert(coleccion, ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, nombreZip)
                     put(MediaStore.MediaColumns.MIME_TYPE, "application/zip")
@@ -2128,6 +3012,7 @@ class MainActivity : AppCompatActivity() {
                 runCatching { espera.dismiss() }
                 res.onFailure { if (it.message != "cancelado") aviso("No se pudo crear el ZIP: ${it.message}") else aviso("ZIP cancelado") }
                 res.getOrNull()?.let { (uri, nombre, detalle) ->
+                    if (drive) { subirANube(ev, uri, nombre, detalle); return@let }
                     mostrar(AlertDialog.Builder(this).setTitle("ZIP listo")
                         .setMessage("$detalle\n\n$carpetaExport$nombre\n\nPor USB: Documents › BoilerImage › Exportaciones")
                         .setPositiveButton("Compartir") { _, _ ->
@@ -2140,6 +3025,165 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }.start()
+    }
+
+    // ---------- Avance del evento y respaldo en Drive ----------
+
+    private class Pend(val clave: String, val est: Int, val etiqueta: String)
+
+    /** Todas las singularidades / elementos del evento con su estado (0 sin fotos, 1 incompleta, 2 completa). */
+    private fun avanceEvento(conteo: Map<String, Pair<Int, Int>>): List<Pend> {
+        val l = mutableListOf<Pend>()
+        if (!esElementos()) tipos.forEachIndexed { ti, t ->
+            t.paredes.forEachIndexed { pi, p ->
+                for (n in 1..p.cantidad)
+                    l.add(Pend(claveSing(ti, pi, n), estado(conteo[carpeta(t, p, n)]), "%s%02d · %s · %s".format(t.prefijo, n, p.nombre, t.nombre)))
+            }
+        }
+        insps.forEachIndexed { ii, _ ->
+            elementosDe(insps[ii].nodo).forEach { (r, _) ->
+                val c = claveNodo(ii, r)
+                l.add(Pend(c, estado(conteo[carpetaNodo(ii, r)]), destDe(c)?.titulo ?: c))
+            }
+        }
+        return l
+    }
+
+    /** Tarjeta de avance (toca = pendientes) y aviso de fotos sin respaldar en Drive. */
+    private fun tarjetasAvance(col: LinearLayout, conteo: Map<String, Pair<Int, Int>>) {
+        val l = avanceEvento(conteo)
+        if (l.isNotEmpty()) {
+            val ok = l.count { it.est == 2 }; val inc = l.count { it.est == 1 }; val sin = l.size - ok - inc
+            val pct = ok * 100 / l.size
+            val det = if (ok == l.size) "Todo completo ✓" else "$ok completas · $inc incompletas · $sin sin fotos · toca para ver pendientes"
+            col.addView(fila("🚦 Avance del evento: $pct %\n$det", { mostrarPendientes(l) }, ok to l.size) { mostrarPendientes(l) })
+        }
+        val sinRespaldo = fotosSinRespaldo(evento)
+        if (sinRespaldo > 0) {
+            val ult = prefs.getLong("drive_$evento", 0L)
+            val cuando = if (ult == 0L) "nunca respaldado"
+                         else "último: " + SimpleDateFormat("dd-MM HH:mm", Locale.getDefault()).format(Date(ult * 1000))
+            col.addView(fila("☁ $sinRespaldo foto(s) sin respaldar en ${nombreNube()}\n$cuando · toca para crear el ZIP y subirlo",
+                { exportarZip(false, drive = true) }) { exportarZip(false, drive = true) })
+        }
+    }
+
+    private fun mostrarPendientes(l: List<Pend>) {
+        val pend = l.filter { it.est != 2 }
+        if (pend.isEmpty()) { aviso("Todo completo ✓"); return }
+        val textos = pend.map { (if (it.est == 0) "○  " else "◐  ") + it.etiqueta + if (it.est == 0) "  — sin fotos" else "  — incompleta" }
+        mostrar(AlertDialog.Builder(this).setTitle("Pendientes (${pend.size})")
+            .setItems(textos.toTypedArray()) { _, i ->
+                val c = pend[i].clave
+                irA(c); render(); menuElemento(c)
+            }
+            .setNegativeButton("Cerrar", null).create())
+    }
+
+    /** Fotos del evento agregadas después del último respaldo en Drive. */
+    private fun fotosSinRespaldo(ev: String): Int {
+        val desde = prefs.getLong("drive_$ev", 0L)
+        return runCatching {
+            contentResolver.query(coleccion, arrayOf(MediaStore.MediaColumns._ID),
+                "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.DATE_ADDED} > ?" + soloImagenes,
+                arrayOf("$raiz/$ev/%", desde.toString()), null)?.use { it.count } ?: 0
+        }.getOrDefault(0)
+    }
+
+    private fun borrarRespaldosAnteriores(ev: String) {
+        runCatching {
+            contentResolver.delete(coleccion,
+                "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?",
+                arrayOf(carpetaExport, "BoilerImage $ev respaldo %.zip"))
+        }
+    }
+
+    private fun nube() = prefs.getString("nube", "drive") ?: "drive"
+    private fun nombreNube() = if (nube() == "onedrive") "OneDrive" else "Drive"
+    private fun paqueteNube() = if (nube() == "onedrive") "com.microsoft.skydrive" else "com.google.android.apps.docs"
+
+    /** Carpeta vinculada (solo con OneDrive elegido) si todavía tenemos permiso sobre ella. */
+    private fun carpetaNube(): Uri? {
+        if (nube() != "onedrive") return null
+        val u = prefs.getString("nube_tree", null)?.let { Uri.parse(it) } ?: return null
+        return if (contentResolver.persistedUriPermissions.any { it.uri == u && it.isWritePermission }) u else null
+    }
+
+    private fun esOneDrive(u: Uri) = (u.authority ?: "").let { it.contains("skydrive", true) || it.contains("onedrive", true) || it.contains("microsoft", true) }
+
+    private fun nombreCarpetaNube(tree: Uri): String = runCatching {
+        val doc = android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, android.provider.DocumentsContract.getTreeDocumentId(tree))
+        contentResolver.query(doc, arrayOf(android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst()) it.getString(0) else null
+        }
+    }.getOrNull() ?: "carpeta elegida"
+
+    private fun menuOneDrive() {
+        val vinc = prefs.getString("nube_tree_nombre", null)
+        val ops = mutableListOf<Pair<String, () -> Unit>>(
+            "☁  ${if (vinc == null) "Vincular" else "Cambiar"} carpeta\nEn el selector abre el menú ☰, elige OneDrive y la carpeta de respaldo" to {
+                aviso("Elige OneDrive en el menú ☰ y luego la carpeta"); runCatching { vincularCarpeta.launch(null) }
+                    .onFailure { aviso("No se pudo abrir el selector de carpetas") }
+            })
+        if (vinc != null) ops.add("✕  Desvincular\nVolver a subir con la app de OneDrive (compartir)" to {
+            prefs.getString("nube_tree", null)?.let { u ->
+                runCatching { contentResolver.releasePersistableUriPermission(Uri.parse(u),
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+            }
+            prefs.edit().remove("nube_tree").remove("nube_tree_nombre").apply()
+            aviso("OneDrive desvinculado"); render()
+        })
+        menuGrande("OneDrive", ops)
+    }
+
+    /** Sube el ZIP: copia directa a la carpeta vinculada o, si no hay, abre la app de Drive / OneDrive. */
+    private fun subirANube(ev: String, uri: Uri, nombre: String, detalle: String) {
+        val carpeta = carpetaNube()
+        if (carpeta == null) {
+            prefs.edit().putLong("drive_$ev", System.currentTimeMillis() / 1000).apply()
+            render()
+            compartirANube(uri, detalle)
+            return
+        }
+        val espera = AlertDialog.Builder(this).setTitle("Subiendo a ${nombreNube()}")
+            .setMessage("Copiando $nombre…\n$detalle").setCancelable(false).show()
+        Thread {
+            val r = runCatching {
+                val padre = android.provider.DocumentsContract.buildDocumentUriUsingTree(carpeta,
+                    android.provider.DocumentsContract.getTreeDocumentId(carpeta))
+                val nuevo = android.provider.DocumentsContract.createDocument(contentResolver, padre, "application/zip", nombre)
+                    ?: error("la carpeta no permite crear archivos")
+                contentResolver.openInputStream(uri)?.use { ins ->
+                    contentResolver.openOutputStream(nuevo, "w")?.use { out -> ins.copyTo(out, 1 shl 16) } ?: error("no se pudo escribir")
+                } ?: error("no se pudo leer el ZIP")
+                Unit
+            }
+            runOnUiThread {
+                runCatching { espera.dismiss() }
+                if (r.isSuccess) {
+                    prefs.edit().putLong("drive_$ev", System.currentTimeMillis() / 1000).apply()
+                    aviso("Respaldo copiado en ${prefs.getString("nube_tree_nombre", nombreNube())} ✓")
+                    render()
+                } else {
+                    aviso("No se pudo copiar a la carpeta vinculada (${r.exceptionOrNull()?.message}). Se abre ${nombreNube()}.")
+                    prefs.edit().putLong("drive_$ev", System.currentTimeMillis() / 1000).apply()
+                    render()
+                    compartirANube(uri, detalle)
+                }
+            }
+        }.start()
+    }
+
+    /** Abre la app de Drive / OneDrive con el ZIP (si no está instalada, el menú de compartir). */
+    private fun compartirANube(uri: Uri, detalle: String) {
+        val i = Intent(Intent.ACTION_SEND).setType("application/zip")
+            .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        aviso("Respaldo listo ($detalle). Elige la carpeta en ${nombreNube()} y guarda.")
+        runCatching { startActivity(Intent(i).setPackage(paqueteNube())) }
+            .onFailure {
+                runCatching { startActivity(Intent.createChooser(i, "Subir respaldo")) }
+                    .onFailure { aviso("No hay app para subir el ZIP") }
+            }
     }
 
     private fun exportarExcel() {
@@ -2178,48 +3222,89 @@ class MainActivity : AppCompatActivity() {
         }
         val meds = mediciones().filter { it.optString("origen") == "sing" }.groupBy { it.optString("ruta") }
         val conNota = carpetasConNota()
+        val cs = conds()
+
+        /** Datos de un elemento (singularidad o elemento del árbol) para su fila del Excel. */
+        class DatosFila(val est: Int, val gen: Int, val det: Int, val marc: Int, val nota: String, val cond: String,
+                        val textoEsp: String, val min: Double?, val textoRA: String)
+        fun datos(ruta: String): DatosFila {
+            val nombres = archivos[ruta].orEmpty()
+            val gen = nombres.count { it.contains("_general") && !it.contains("_marcada") }
+            val det = nombres.count { it.contains("_detalle") && !it.contains("_marcada") }
+            val marc = nombres.count { it.contains("_marcada") }
+            // igual que contarFotos(): todo lo que no es general cuenta como detalle
+            val info = gen to nombres.count { !it.contains("_marcada") && !it.contains("_general") }
+            val nota = if (ruta in conNota) leerNota(ruta) else ""
+            val lista = meds[ruta].orEmpty()
+            val valores = lista.filter { !esRA(it) }.flatMap { puntosDe(it) }.mapNotNull { numero(it.valor) }
+            val textoEsp = lista.filter { !esRA(it) }.joinToString("\n") { m ->
+                puntosDe(m).mapIndexed { i, pt -> "P${i + 1} ${textoValor(pt.valor)}" }.joinToString(" · ")
+            }
+            val textoRA = lista.filter { esRA(it) }.joinToString("\n") {
+                "${it.optString("modo")}: ${it.optString("resumen").replace("\n", " · ")}"
+            }
+            return DatosFila(estado(info), gen, det, marc, nota, cs.optString(ruta), textoEsp, valores.minOrNull(), textoRA)
+        }
+        fun textoEstado(e: Int) = when (e) { 2 -> "Completa"; 1 -> "Incompleta"; else -> "Sin fotos" }
+        fun condCelda(c: String) = if (c.isEmpty()) null else textoCond(c)
+
         val x = Xlsx()
         val resumen = x.hoja("Resumen",
             listOf("Tipo", "Pared", "Singularidades", "Completas", "Incompletas", "Sin fotos", "Con nota", "Espesor mín. (mm)"),
             listOf(24, 20, 14, 12, 12, 11, 11, 16))
         for (t in tipos) {
             val h = x.hoja(t.nombre,
-                listOf("Pared", "Singularidad", "Estado", "Generales", "Detalles", "Marcadas", "Nota",
+                listOf("Pared", "Singularidad", "Estado", "Condición", "Generales", "Detalles", "Marcadas", "Nota",
                        "Espesores (mm)", "Espesor mín. (mm)", "Mediciones RA"),
-                listOf(18, 13, 12, 11, 10, 10, 45, 40, 16, 40))
+                listOf(18, 13, 12, 13, 11, 10, 10, 45, 40, 16, 40))
             for (p in t.paredes) {
                 var completas = 0; var incompletas = 0; var sinFotos = 0; var notas = 0
                 var minPared: Double? = null
                 for (n in 1..p.cantidad) {
-                    val ruta = carpeta(t, p, n)
-                    val nombres = archivos[ruta].orEmpty()
-                    val gen = nombres.count { it.contains("_general") && !it.contains("_marcada") }
-                    val det = nombres.count { it.contains("_detalle") && !it.contains("_marcada") }
-                    val marc = nombres.count { it.contains("_marcada") }
-                    // igual que contarFotos(): todo lo que no es general cuenta como detalle
-                    val info = gen to nombres.count { !it.contains("_marcada") && !it.contains("_general") }
-                    val est = estado(info)
-                    when (est) { 2 -> completas++; 1 -> incompletas++; else -> sinFotos++ }
-                    val nota = if (ruta in conNota) leerNota(ruta) else ""
-                    if (nota.isNotBlank()) notas++
-                    val lista = meds[ruta].orEmpty()
-                    val esp = lista.filter { !esRA(it) }.flatMap { puntosDe(it) }
-                    val valores = esp.mapNotNull { numero(it.valor) }
-                    val min = valores.minOrNull()
-                    if (min != null) minPared = minOf(minPared ?: min, min)
-                    val textoEsp = lista.filter { !esRA(it) }.joinToString("\n") { m ->
-                        puntosDe(m).mapIndexed { i, pt -> "P${i + 1} ${textoValor(pt.valor)}" }.joinToString(" · ")
-                    }
-                    val textoRA = lista.filter { esRA(it) }.joinToString("\n") {
-                        "${it.optString("modo")}: ${it.optString("resumen").replace("\n", " · ")}"
-                    }
-                    h.fila(p.nombre, "%s %02d".format(t.prefijo, n),
-                        when (est) { 2 -> "Completa"; 1 -> "Incompleta"; else -> "Sin fotos" },
-                        gen, det, if (marc > 0) marc else null, nota.ifBlank { null },
-                        textoEsp.ifBlank { null }, min, textoRA.ifBlank { null })
+                    val f = datos(carpeta(t, p, n))
+                    when (f.est) { 2 -> completas++; 1 -> incompletas++; else -> sinFotos++ }
+                    if (f.nota.isNotBlank()) notas++
+                    f.min?.let { minPared = minOf(minPared ?: it, it) }
+                    h.fila(p.nombre, "%s %02d".format(t.prefijo, n), textoEstado(f.est), condCelda(f.cond),
+                        f.gen, f.det, if (f.marc > 0) f.marc else null, f.nota.ifBlank { null },
+                        f.textoEsp.ifBlank { null }, f.min, f.textoRA.ifBlank { null })
                 }
                 resumen.fila(t.nombre, p.nombre, p.cantidad, completas, incompletas, sinFotos, notas, minPared)
             }
+        }
+        // Inspecciones por árbol: una hoja cada una con todos sus elementos; en Resumen, una fila
+        // por cada elemento del primer nivel (o la inspección completa si no tiene niveles).
+        insps.forEachIndexed { ii, ins ->
+            val h = x.hoja(ins.nodo.nombre,
+                listOf("Ubicación", "Código", "Estado", "Condición", "Generales", "Detalles", "Marcadas", "Nota",
+                       "Espesores (mm)", "Espesor mín. (mm)", "Mediciones RA"),
+                listOf(40, 16, 12, 13, 11, 10, 10, 45, 40, 16, 40))
+            for (r in listOf(emptyList<Int>()) + todosNodos(ins.nodo)) {
+                val d = destDe(claveNodo(ii, r)) ?: continue
+                val f = datos(d.ruta)
+                val nodo = nodoEn(ii, r) ?: continue
+                // la raíz solo aparece si tiene algo registrado
+                if (r.isEmpty() && nodo.hijos.isNotEmpty() && f.gen + f.det + f.marc == 0 && f.nota.isBlank() &&
+                    f.cond.isEmpty() && f.textoEsp.isBlank() && f.textoRA.isBlank()) continue
+                val ubic = if (r.isEmpty()) "(carpeta principal)" else cadena(ii, r).joinToString(" › ") { it.nombre }
+                h.fila(ubic, d.codigo, textoEstado(f.est), condCelda(f.cond), f.gen, f.det,
+                    if (f.marc > 0) f.marc else null, f.nota.ifBlank { null }, f.textoEsp.ifBlank { null }, f.min,
+                    f.textoRA.ifBlank { null })
+            }
+            val grupos = if (ins.nodo.hijos.isEmpty()) listOf(emptyList<Int>() to ins.nodo)
+                         else ins.nodo.hijos.mapIndexed { i, n -> listOf(i) to n }
+            for ((rg, ng) in grupos) {
+                val todos = (listOf(rg) + todosNodos(ng, rg)).map { datos(carpetaNodo(ii, it)) }
+                val hojas = elementosDe(ng, rg).map { datos(carpetaNodo(ii, it.first)) }
+                resumen.fila(ins.nodo.nombre, if (rg.isEmpty()) "—" else ng.nombre, hojas.size,
+                    hojas.count { it.est == 2 }, hojas.count { it.est == 1 }, hojas.count { it.est == 0 },
+                    todos.count { it.nota.isNotBlank() }, todos.mapNotNull { it.min }.minOrNull())
+            }
+        }
+        val notasC = notasCompiladas()
+        if (notasC.isNotEmpty()) {
+            val h = x.hoja("Notas", listOf("Componente", "Ubicación", "Código", "Condición", "Nota"), listOf(24, 36, 14, 13, 70))
+            notasC.forEach { n -> h.fila(n.grupo, n.ubic, n.cod, condCelda(n.cond), n.texto.ifBlank { null }) }
         }
         val regs = registros()
         if (regs.isNotEmpty()) {
@@ -2323,7 +3408,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun lanzarCamara(uri: Uri, modo: String) {
         prefs.edit().putString("pendUri", uri.toString()).putString("pendModo", modo)
-            .putInt("pendTipo", -1).putInt("pendPared", -1).putInt("pendNum", -1).apply()
+            .remove("pendClave").apply()
         val fallar = {
             runCatching { contentResolver.delete(uri, null, null) }
             if (modo == "medBase") { val s = sesionMed(); guardarSesionMed(null); volverDeMedicion(s) }
@@ -2342,9 +3427,9 @@ class MainActivity : AppCompatActivity() {
             "Medicion_%02d".format(k), "$evento — Medición %02d".format(k))
     }
 
-    private fun medirConRA(origen: String, ruta: String, base: String, titulo: String, ti: Int = -1, pi: Int = -1, n: Int = -1) {
+    private fun medirConRA(origen: String, ruta: String, base: String, titulo: String, clave: String = "") {
         val d = JSONObject().put("origen", origen).put("ruta", ruta).put("extra", ruta).put("base", base)
-            .put("titulo", titulo).put("ti", ti).put("pi", pi).put("n", n)
+            .put("titulo", titulo).put("clave", clave)
         prefs.edit().putString("pendRA", d.toString()).apply()
         medirRA.launch(Intent(this, MedirRAActivity::class.java)
             .putExtra("ruta", ruta).putExtra("nombre", "$base.jpg").putExtra("titulo", titulo))
@@ -2357,29 +3442,26 @@ class MainActivity : AppCompatActivity() {
         medirConRA("terreno", carpetaTerreno, "RA_%02d".format(k), "$evento — Medición RA %02d".format(k))
     }
 
-    private fun medirRASingularidad(ti: Int, pi: Int, n: Int) {
-        val t = tipos[ti]; val p = t.paredes[pi]
-        val ruta = carpeta(t, p, n)
-        val pre = "%s%02d_RA_".format(t.prefijo, n)
-        val k = libre(ruta, "$pre%d.jpg")
-        medirConRA("sing", ruta, "$pre$k", "$evento — %s %02d — %s".format(t.prefijo, n, p.nombre), ti, pi, n)
+    private fun medirRAEn(clave: String) {
+        val d = destDe(clave) ?: return
+        val pre = "${d.codigo}_RA_"
+        val k = libre(d.ruta, "$pre%d.jpg")
+        medirConRA("sing", d.ruta, "$pre$k", "$evento — ${d.titulo}", clave)
     }
 
-    private fun medicionSingularidad(ti: Int, pi: Int, n: Int) {
-        val t = tipos[ti]; val p = t.paredes[pi]
-        val ruta = carpeta(t, p, n)
-        val pre = "%s%02d_espesores_".format(t.prefijo, n)
-        val k = libre(ruta, "$pre%d.jpg")
-        iniciarMedicion("sing", ruta, ruta + "Espesores/", "$pre$k",
-            "$evento — %s %02d — %s".format(t.prefijo, n, p.nombre), ti, pi, n)
+    private fun medicionEn(clave: String) {
+        val d = destDe(clave) ?: return
+        val pre = "${d.codigo}_espesores_"
+        val k = libre(d.ruta, "$pre%d.jpg")
+        iniciarMedicion("sing", d.ruta, d.ruta + "Espesores/", "$pre$k", "$evento — ${d.titulo}", clave)
     }
 
     private fun iniciarMedicion(origen: String, ruta: String, extra: String, base: String, titulo: String,
-                                ti: Int = -1, pi: Int = -1, n: Int = -1) {
+                                clave: String = "") {
         val uri = crearImagen(extra, "${base}_original.jpg") ?: run { aviso("No se pudo crear el archivo"); return }
         val s = JSONObject().put("origen", origen).put("ruta", ruta).put("extra", extra)
             .put("base", base).put("titulo", titulo).put("foto", uri.toString())
-            .put("fecha", System.currentTimeMillis()).put("ti", ti).put("pi", pi).put("n", n)
+            .put("fecha", System.currentTimeMillis()).put("clave", clave)
             .put("puntos", JSONArray())
         guardarSesionMed(s)
         aviso("1. Toma una foto de la zona medida")
@@ -2401,8 +3483,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun volverDeMedicion(s: JSONObject?) {
         if (s?.optString("origen") == "terreno") enTerreno = true
-        else if (s != null && s.optInt("ti") >= 0) {
-            enEvento = true; tipoActual = s.optInt("ti"); paredActual = s.optInt("pi")
+        else if (s != null) {
+            val c = s.optString("clave").ifEmpty {
+                // mediciones de versiones anteriores (sin clave)
+                if (s.optInt("ti", -1) >= 0) claveSing(s.optInt("ti"), s.optInt("pi"), s.optInt("n")) else ""
+            }
+            if (c.isNotEmpty()) irA(c)
         }
         render()
     }
@@ -3039,21 +4125,13 @@ class MainActivity : AppCompatActivity() {
      * Abre la cámara BoilerImage en la singularidad indicada. Recibe la lista de todas las
      * singularidades del tipo (todas sus paredes) para poder saltar a la siguiente desde la cámara.
      */
-    private fun abrirCamaraPropia(ti: Int, pi: Int, n: Int, modo: String) {
-        val t = tipos[ti]
-        val rutas = ArrayList<String>(); val codigos = ArrayList<String>(); val titulos = ArrayList<String>()
-        val paredDe = ArrayList<Int>()
-        var indice = 0
-        t.paredes.forEachIndexed { j, p ->
-            for (k in 1..p.cantidad) {
-                if (j == pi && k == n) indice = rutas.size
-                rutas.add(carpeta(t, p, k)); codigos.add("%s%02d".format(t.prefijo, k))
-                titulos.add("%s%02d · %s".format(t.prefijo, k, p.nombre)); paredDe.add(j)
-            }
-        }
-        prefs.edit().putInt("camTipo", ti).putString("camParedes", paredDe.joinToString(","))
-            .putString("camNums", t.paredes.flatMap { p -> (1..p.cantidad).toList() }.joinToString(","))
-            .putString("camModo", modo).apply()
+    private fun abrirCamaraPropia(clave: String, modo: String) {
+        val lista = vecinos(clave).mapNotNull { destDe(it) }
+        val indice = lista.indexOfFirst { it.clave == clave }.coerceAtLeast(0)
+        val rutas = ArrayList(lista.map { it.ruta })
+        val codigos = ArrayList(lista.map { it.codigo })
+        val titulos = ArrayList(lista.map { "${it.codigo} · ${it.grupo}" })
+        prefs.edit().putString("camClaves", lista.joinToString("\n") { it.clave }).putString("camModo", modo).apply()
         conCamara {
             camaraBI.launch(Intent(this, CamaraActivity::class.java)
                 .putStringArrayListExtra("rutas", rutas).putStringArrayListExtra("codigos", codigos)
@@ -3062,37 +4140,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val camaraBI = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        val ti = prefs.getInt("camTipo", -1)
-        val paredes = prefs.getString("camParedes", "")!!.split(',').mapNotNull { it.toIntOrNull() }
-        val nums = prefs.getString("camNums", "")!!.split(',').mapNotNull { it.toIntOrNull() }
+        val claves = prefs.getString("camClaves", "")!!.split('\n').filter { it.isNotEmpty() }
         val modo = prefs.getString("camModo", "general") ?: "general"
         val i = res.data?.getIntExtra("indice", -1) ?: -1
-        if (ti >= 0) {
-            enEvento = true; tipoActual = ti
-            paredes.getOrNull(i)?.let { paredActual = it }
-        }
+        val clave = claves.getOrNull(i) ?: claves.firstOrNull()
+        clave?.let { irA(it) }
         render()
         val error = res.data?.getStringExtra("error")
-        if (res.resultCode != RESULT_OK && error != null && ti in tipos.indices) {
+        if (res.resultCode != RESULT_OK && error != null && clave != null && destDe(clave) != null) {
             // La cámara propia no abrió: se usa la del teléfono
             aviso("No se pudo abrir la cámara BoilerImage ($error). Se usa la del teléfono.")
-            val pi = paredes.getOrNull(i) ?: return@registerForActivityResult
-            val n = nums.getOrNull(i) ?: return@registerForActivityResult
-            tomarFotoSistema(ti, pi, n, modo)
+            tomarFotoSistema(clave, modo)
         }
     }
 
-    private fun tomarFoto(ti: Int, pi: Int, n: Int, modo: String) {
-        if (ti !in tipos.indices || pi !in tipos[ti].paredes.indices) return
-        if (camaraPropia()) abrirCamaraPropia(ti, pi, n, modo) else tomarFotoSistema(ti, pi, n, modo)
+    private fun tomarFoto(clave: String, modo: String) {
+        if (destDe(clave) == null) return
+        if (camaraPropia()) abrirCamaraPropia(clave, modo) else tomarFotoSistema(clave, modo)
     }
 
-    private fun tomarFotoSistema(ti: Int, pi: Int, n: Int, modo: String) {
-        if (ti !in tipos.indices || pi !in tipos[ti].paredes.indices) return
-        val t = tipos[ti]
-        val p = t.paredes[pi]
-        val ruta = carpeta(t, p, n)
-        val pre = "%s%02d_%s_".format(t.prefijo, n, modo)
+    private fun tomarFotoSistema(clave: String, modo: String) {
+        val d = destDe(clave) ?: return
+        val ruta = d.ruta
+        val pre = "${d.codigo}_${modo}_"
         val nombre = "$pre${libre(ruta, "$pre%d.jpg")}.jpg"
 
         val valores = ContentValues().apply {
@@ -3106,9 +4176,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit()
             .putString("pendUri", uri.toString())
             .putString("pendModo", modo)
-            .putInt("pendTipo", ti)
-            .putInt("pendPared", pi)
-            .putInt("pendNum", n)
+            .putString("pendClave", clave)
             .apply()
         conCamara(siNo = { runCatching { contentResolver.delete(uri, null, null) } }) {
             try {
@@ -3232,6 +4300,34 @@ class MainActivity : AppCompatActivity() {
     private val medio: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 
     /** Fondo redondeado con efecto al tocar. */
+    /** Fondo de una celda de grilla según estado; la seleccionada lleva anillo naranjo grueso. */
+    private fun fondoCelda(est: Int, borde: Int?, sel: Boolean): android.graphics.drawable.Drawable {
+        val relleno = when (est) { 2 -> C.ok; 1 -> C.parcial; else -> C.superficie }
+        if (!sel) return when {
+            borde != null -> fondoRedondeado(relleno, 12, borde, 3)
+            est == 0 -> fondoRedondeado(relleno, 12, C.borde)
+            else -> fondoRedondeado(relleno, 12)
+        }
+        val anillo = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(C.acento) }
+        val interior = GradientDrawable().apply {
+            cornerRadius = dp(10).toFloat(); setColor(relleno); setStroke(dp(2), Color.WHITE)
+        }
+        return android.graphics.drawable.LayerDrawable(arrayOf(anillo, interior)).apply {
+            setLayerInset(1, dp(4), dp(4), dp(4), dp(4))
+        }
+    }
+
+    /** Marca [b] como seleccionada y quita la marca a las demás celdas de la misma grilla. */
+    private fun seleccionar(b: View, clave: String) {
+        seleccion = clave
+        val g = b.parent as? ViewGroup ?: return
+        for (i in 0 until g.childCount) {
+            val v = g.getChildAt(i)
+            @Suppress("UNCHECKED_CAST")
+            (v.getTag(R.id.pintarCelda) as? () -> android.graphics.drawable.Drawable)?.let { v.background = it() }
+        }
+    }
+
     private fun fondoRedondeado(color: Int, radio: Int = 14, borde: Int? = null, ancho: Int = 1): android.graphics.drawable.Drawable {
         val forma = GradientDrawable().apply {
             cornerRadius = dp(radio).toFloat(); setColor(color); borde?.let { setStroke(dp(ancho), it) }
@@ -3248,7 +4344,8 @@ class MainActivity : AppCompatActivity() {
         "✋" to R.drawable.ic_mover, "🗑" to R.drawable.ic_borrar, "🖼" to R.drawable.ic_imagen,
         "⌨️" to R.drawable.ic_teclado, "⌨" to R.drawable.ic_teclado, "←" to R.drawable.ic_volver,
         "＋" to R.drawable.ic_agregar, "✕" to R.drawable.ic_cerrar, "✓" to R.drawable.ic_listo,
-        "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento, "📐" to R.drawable.ic_regla, "📦" to R.drawable.ic_zip)
+        "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento, "📐" to R.drawable.ic_regla, "📦" to R.drawable.ic_zip,
+        "🌳" to R.drawable.ic_arbol, "🚦" to R.drawable.ic_estado, "☁" to R.drawable.ic_nube)
 
     /** Separa un emoji inicial del texto: (ícono, texto limpio). */
     private fun separarIcono(s: String): Pair<Int?, String> {
@@ -3403,7 +4500,7 @@ class MainActivity : AppCompatActivity() {
         })
         progreso?.let { (hechos, total) -> textos.addView(barra(hechos, total)) }
         tarjeta.addView(textos)
-        tarjeta.addView(botonIcono(R.drawable.ic_editar) { onEditar() })
+        tarjeta.addView(botonIcono(R.drawable.ic_editar) { onEditar() }.apply { contentDescription = "Editar" })
         return tarjeta
     }
 
