@@ -99,8 +99,24 @@ tap "t02"; sleep 2; tap "tomar foto"; sleep 4; cap camara_t02
 adb shell input keyevent KEYCODE_BACK; sleep 4; cap tras_camara
 tap "t01"; sleep 2; cap menu_t01_fotos
 tap "ver fotos capturadas"; sleep 3; cap galeria
+# --- v4.8: medir con referencia en el editor ---
+b=$(buscar "=Marcar"); [ -z "$b" ] && { tap "general 1" 3; }
+adb shell input tap $((WX/2)) $((WY*30/100)); sleep 3; cap visor_v48
+tap "=Marcar" 3; tap "=Medir" 2
+adb shell input swipe $((WX*25/100)) $((WY*40/100)) $((WX*75/100)) $((WY*40/100)) 600; sleep 2; cap pedir_ref
+adb shell input text "63.5"; sleep 1; tap "=Usar" 2
+adb shell input swipe $((WX*40/100)) $((WY*30/100)) $((WX*55/100)) $((WY*30/100)) 600; sleep 2; cap medida
+tap "=Guardar" 5; cap marcada_guardada
+adb shell input keyevent KEYCODE_BACK; sleep 2; adb shell input keyevent KEYCODE_BACK; sleep 2
 adb shell input keyevent KEYCODE_BACK; sleep 2
 largo "t03"; cap menu_largo_t03; adb shell input keyevent KEYCODE_BACK; sleep 1
+# --- v4.8: foto de espesores con la cámara BoilerImage ---
+tap "t05"; sleep 2; tap "foto con puntos de espesor" 6; cap camara_espesores
+tap "tomar foto" 6; cap tras_foto_espesores
+adb shell input keyevent KEYCODE_BACK; sleep 2; cap tras_espesores_atras
+b=$(buscar "=Sí"); [ -n "$b" ] && { adb shell input tap $b; sleep 2; }
+b=$(buscar "descartar"); [ -n "$b" ] && { adb shell input tap $b; sleep 2; }
+cap despues_espesores
 
 # --- Volver a la raíz: carpeta con nombre leído desde imagen ---
 abajo; abajo; abajo; tap "volver"; sleep 2; cap raiz_paneles
