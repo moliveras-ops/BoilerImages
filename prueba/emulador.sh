@@ -116,9 +116,10 @@ largo "p02"; tap "abrir carpeta"; sleep 2; cap panel02
 abajo; abajo; abajo; tap "volver"; sleep 2
 
 # --- v4.6: avance y respaldo ---
-cap avance_raiz
+arriba() { adb shell input swipe $((WX/2)) $((WY*30/100)) $((WX/2)) $((WY*85/100)) 300; sleep 1; }
+arriba; arriba; arriba; arriba; cap avance_raiz
 tap "avance del evento" 2; cap pendientes_lista; adb shell input keyevent KEYCODE_BACK; sleep 1
-tap "sin respaldar en drive" 8; cap drive_intento; adb shell input keyevent KEYCODE_BACK; sleep 2; cap tras_drive
+tap "sin respaldar en drive" 10; cap drive_intento; adb shell input keyevent KEYCODE_BACK; sleep 2; cap tras_drive; arriba; arriba; cap avance_tras_respaldo
 adb shell am start -n $PKG/.MainActivity; sleep 3
 
 # --- Exportaciones ---
