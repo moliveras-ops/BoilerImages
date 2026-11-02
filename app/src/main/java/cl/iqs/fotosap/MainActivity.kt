@@ -75,10 +75,14 @@ class MainActivity : AppCompatActivity() {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         }.onFailure { aviso("Esa carpeta no permite acceso permanente: ${it.message}"); return@registerForActivityResult }
         val nombre = nombreCarpetaNube(uri)
-        prefs.edit().putString("nube_tree", uri.toString()).putString("nube_tree_nombre", nombre).apply()
+        val cambio = prefs.getString("nube_tree", null) != uri.toString()
+        prefs.edit().putString("nube_tree", uri.toString()).putString("nube_tree_nombre", nombre).putBoolean("sync_auto", true).apply()
+        if (cambio) Sincronizar.olvidar(this)   // carpeta nueva: copiar todo de nuevo
+        Sincronizar.ahora(this)
         val esOneDrive = esOneDrive(uri)
         mostrar(AlertDialog.Builder(this).setTitle("Carpeta vinculada")
-            .setMessage("Los respaldos se copiarán automáticamente en:\n$nombre" +
+            .setMessage("La carpeta BoilerImage del teléfono se sincronizará automáticamente con:\n$nombre\n\n" +
+                "Se copian las fotos, notas y Excel nuevos o modificados (sin borrar nada en la nube). La primera vez puede tardar." +
                 (if (esOneDrive) "\n\n(OneDrive)" else "\n\nOjo: esta carpeta no parece ser de OneDrive. Se usará igual."))
             .setPositiveButton("OK", null).create())
         render()
@@ -91,7 +95,7 @@ class MainActivity : AppCompatActivity() {
     // Respaldo automático cada vez que cambia la configuración
     private var respaldoPendiente = false
     private val alCambiarPrefs = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, clave ->
-        if (clave == null || clave.startsWith("pend") || clave == "respaldo_uri" || clave.startsWith("nube_tree") || respaldoPendiente) return@OnSharedPreferenceChangeListener
+        if (clave == null || clave.startsWith("pend") || clave == "respaldo_uri" || clave.startsWith("nube_tree") || clave.startsWith("sync_") || respaldoPendiente) return@OnSharedPreferenceChangeListener
         respaldoPendiente = true
         android.os.Handler(android.os.Looper.getMainLooper())
             .postDelayed({ respaldoPendiente = false; respaldar(false) }, 1500)
@@ -490,8 +494,8 @@ class MainActivity : AppCompatActivity() {
         })
         if (nube() == "onedrive") {
             val vinc = prefs.getString("nube_tree_nombre", null)
-            col.addView(boton(if (vinc == null) "☁  Vincular carpeta de OneDrive\nLos respaldos se suben solos, sin tocar nada"
-                              else "☁  OneDrive vinculado: $vinc\nToca para cambiar o desvincular") { menuOneDrive() })
+            col.addView(boton(if (vinc == null) "☁  Vincular carpeta de OneDrive\nElige la carpeta BOILERIMAGE: se sincroniza sola"
+                              else "☁  OneDrive vinculado: $vinc\n${textoSync()} · toca para opciones") { menuOneDrive() })
         }
         col.addView(espacio(20))
         col.addView(texto("Carpeta en el teléfono:\nAlmacenamiento interno > $raiz", 13f))
@@ -2184,6 +2188,7 @@ class MainActivity : AppCompatActivity() {
     private fun guardarNota(ruta: String, texto: String) {
         escribirTexto(ruta, "nota.txt", texto)
         aviso(if (texto.isBlank()) "Nota eliminada" else "Nota guardada")
+        Sincronizar.programar(this)
     }
 
     private fun carpetasConNota(): Set<String> {
@@ -2240,7 +2245,7 @@ class MainActivity : AppCompatActivity() {
         o.put("app", "BoilerImage").put("version", 1).put("fecha", System.currentTimeMillis())
         val datos = JSONObject()
         for ((k, v) in prefs.all) {
-            if (k.startsWith("pend") || k == "respaldo_uri" || k.startsWith("nube_tree") || v == null) continue
+            if (k.startsWith("pend") || k == "respaldo_uri" || k.startsWith("nube_tree") || k.startsWith("sync_") || v == null) continue
             val t = when (v) {
                 is String -> "s"; is Int -> "i"; is Long -> "l"; is Boolean -> "b"; is Float -> "f"
                 else -> continue
@@ -3083,6 +3088,7 @@ class MainActivity : AppCompatActivity() {
             }
             runOnUiThread {
                 runCatching { espera.dismiss() }
+                if (res.isSuccess) Sincronizar.programar(this)
                 res.onFailure { if (it.message != "cancelado") aviso("No se pudo crear el ZIP: ${it.message}") else aviso("ZIP cancelado") }
                 res.getOrNull()?.let { (uri, nombre, detalle) ->
                     if (drive) { subirANube(ev, uri, nombre, detalle); return@let }
@@ -3136,6 +3142,11 @@ class MainActivity : AppCompatActivity() {
             val det = if (ok == l.size) "Todo completo ✓" else "$ok completas · $inc incompletas · $sin sin fotos · toca para ver pendientes"
             col.addView(fila("🚦 Avance del evento: $pct %\n$det", { mostrarPendientes(l) }, ok to l.size) { mostrarPendientes(l) })
         }
+        if (carpetaNube() != null && prefs.getBoolean("sync_auto", true)) {
+            col.addView(fila("☁ Sincronización con ${prefs.getString("nube_tree_nombre", "OneDrive")}\n${textoSync()} · toca para sincronizar ahora",
+                { Sincronizar.ahora(this); aviso("Sincronizando…") }) { menuOneDrive() })
+            return
+        }
         val sinRespaldo = fotosSinRespaldo(evento)
         if (sinRespaldo > 0) {
             val ult = prefs.getLong("drive_$evento", 0L)
@@ -3176,6 +3187,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun textoSync(): String {
+        val cuando = prefs.getLong("sync_cuando", 0L)
+        val hora = if (cuando == 0L) "" else " (" + SimpleDateFormat("dd-MM HH:mm", Locale.getDefault()).format(Date(cuando * 1000)) + ")"
+        val det = prefs.getString("sync_detalle", "") ?: ""
+        return when (prefs.getString("sync_estado", "")) {
+            "corriendo" -> "Sincronizando… $det"
+            "pausa" -> "En pausa: $det"
+            "ok" -> "Al día ✓ · $det$hora"
+            "error" -> "⚠ Error: $det$hora"
+            else -> if (prefs.getBoolean("sync_auto", true)) "Pendiente de la primera sincronización" else "Sincronización en pausa"
+        }
+    }
+
     private fun nube() = prefs.getString("nube", "drive") ?: "drive"
     private fun nombreNube() = if (nube() == "onedrive") "OneDrive" else "Drive"
     private fun paqueteNube() = if (nube() == "onedrive") "com.microsoft.skydrive" else "com.google.android.apps.docs"
@@ -3203,6 +3227,14 @@ class MainActivity : AppCompatActivity() {
                 aviso("Elige OneDrive en el menú ☰ y luego la carpeta"); runCatching { vincularCarpeta.launch(null) }
                     .onFailure { aviso("No se pudo abrir el selector de carpetas") }
             })
+        if (vinc != null) {
+            val auto = prefs.getBoolean("sync_auto", true)
+            ops.add("☁  Sincronizar ahora\n${textoSync()}" to { Sincronizar.ahora(this); aviso("Sincronizando con $vinc…") })
+            ops.add((if (auto) "⏸  Pausar sincronización automática" else "▶  Activar sincronización automática") +
+                    "\nAl volver de la cámara y al salir de la app" to {
+                prefs.edit().putBoolean("sync_auto", !auto).apply(); if (!auto) Sincronizar.ahora(this); render()
+            })
+        }
         if (vinc != null) ops.add("✕  Desvincular\nVolver a subir con la app de OneDrive (compartir)" to {
             prefs.getString("nube_tree", null)?.let { u ->
                 runCatching { contentResolver.releasePersistableUriPermission(Uri.parse(u),
@@ -3273,6 +3305,7 @@ class MainActivity : AppCompatActivity() {
                 res.onFailure { aviso("No se pudo generar el Excel: ${it.message}") }
                 res.getOrNull()?.let { (uri, nombre) ->
                     exportarNotas()   // mantiene también el CSV de notas
+                    Sincronizar.programar(this)
                     mostrar(AlertDialog.Builder(this).setTitle("Excel listo")
                         .setMessage("$raiz/$evento/$nombre")
                         .setPositiveButton("Abrir") { _, _ ->
@@ -4228,7 +4261,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStop() {
+        super.onStop()
+        if (isChangingConfigurations) return
+        val ev = evento
+        if (carpetaNube() != null && prefs.getBoolean("sync_auto", true) && enEvento && ev.isNotEmpty()) {
+            // Excel y CSV del evento al día antes de subir, para que en la nube esté todo actualizado
+            val ctx = applicationContext
+            Thread {
+                if (ev == evento) { runCatching { generarExcel() }; runCatching { exportarNotas() } }
+                Sincronizar.programar(ctx)
+            }.start()
+        } else Sincronizar.programar(this)
+    }
+
     private val camaraBI = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        Sincronizar.programar(this)
         val claves = prefs.getString("camClaves", "")!!.split('\n').filter { it.isNotEmpty() }
         val modo = prefs.getString("camModo", "general") ?: "general"
         val i = res.data?.getIntExtra("indice", -1) ?: -1
