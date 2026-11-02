@@ -461,9 +461,10 @@ class MainActivity : AppCompatActivity() {
     private fun pantallaTipos() {
         title = evento
         val col = columna()
+        val conteo = contarFotos()
+        tarjetasAvance(col, conteo)
         col.addView(texto("Tipos de singularidad", 14f, true))
 
-        val conteo = contarFotos()
         val notas = todasLasNotas()
         tipos.forEachIndexed { i, t ->
             val total = t.paredes.sumOf { it.cantidad }
@@ -1060,6 +1061,7 @@ class MainActivity : AppCompatActivity() {
         if (prof > 0) col.addView(texto((listOf(ins.nodo) + cadena(ii, r)).joinToString(" › ") { it.nombre }, 13f))
 
         val conteo = contarFotos()
+        if (prof == 0 && elem) tarjetasAvance(col, conteo)
         val conNota = carpetasConNota()
         val cs = conds()
         val clave = claveNodo(ii, r)
@@ -2895,7 +2897,8 @@ class MainActivity : AppCompatActivity() {
     private fun menuZip() {
         menuGrande("Exportar evento (ZIP)", listOf(
             "📦  Evento completo\nTodas las fotos, notas y Excel" to { exportarZip(false) },
-            "🖼  Solo para informe\nGenerales, marcadas, ★ informe, espesores y RA (sin detalles ni originales)" to { exportarZip(true) }))
+            "🖼  Solo para informe\nGenerales, marcadas, ★ informe, espesores y RA (sin detalles ni originales)" to { exportarZip(true) },
+            "☁  Respaldar en Google Drive\nZIP completo y se abre Drive para subirlo" to { exportarZip(false, drive = true) }))
     }
 
     private val estrellasZip = HashMap<String, Set<String>>()
@@ -2909,7 +2912,7 @@ class MainActivity : AppCompatActivity() {
         return true
     }
 
-    private fun exportarZip(informe: Boolean) {
+    private fun exportarZip(informe: Boolean, drive: Boolean = false) {
         val ev = evento
         val vista = TextView(this).apply { text = "Preparando…"; textSize = 16f; setPadding(dp(24), dp(20), dp(24), dp(8)) }
         val barraP = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -2942,7 +2945,8 @@ class MainActivity : AppCompatActivity() {
                 lista.sortBy { it.ruta + it.nombre }
                 val total = lista.sumOf { maxOf(it.tam, 1L) }
                 val sello = SimpleDateFormat("yyyy-MM-dd HHmm", Locale.getDefault()).format(Date())
-                val nombreZip = "BoilerImage $ev ${if (informe) "informe" else "completo"} $sello.zip"
+                val nombreZip = "BoilerImage $ev ${if (drive) "respaldo" else if (informe) "informe" else "completo"} $sello.zip"
+                if (drive) borrarRespaldosAnteriores(ev)   // queda solo el último respaldo en el teléfono
                 val uriZip = contentResolver.insert(coleccion, ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, nombreZip)
                     put(MediaStore.MediaColumns.MIME_TYPE, "application/zip")
@@ -2982,6 +2986,12 @@ class MainActivity : AppCompatActivity() {
                 runCatching { espera.dismiss() }
                 res.onFailure { if (it.message != "cancelado") aviso("No se pudo crear el ZIP: ${it.message}") else aviso("ZIP cancelado") }
                 res.getOrNull()?.let { (uri, nombre, detalle) ->
+                    if (drive) {
+                        prefs.edit().putLong("drive_$ev", System.currentTimeMillis() / 1000).apply()
+                        subirADrive(uri, detalle)
+                        render()
+                        return@let
+                    }
                     mostrar(AlertDialog.Builder(this).setTitle("ZIP listo")
                         .setMessage("$detalle\n\n$carpetaExport$nombre\n\nPor USB: Documents › BoilerImage › Exportaciones")
                         .setPositiveButton("Compartir") { _, _ ->
@@ -2994,6 +3004,89 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }.start()
+    }
+
+    // ---------- Avance del evento y respaldo en Drive ----------
+
+    private class Pend(val clave: String, val est: Int, val etiqueta: String)
+
+    /** Todas las singularidades / elementos del evento con su estado (0 sin fotos, 1 incompleta, 2 completa). */
+    private fun avanceEvento(conteo: Map<String, Pair<Int, Int>>): List<Pend> {
+        val l = mutableListOf<Pend>()
+        if (!esElementos()) tipos.forEachIndexed { ti, t ->
+            t.paredes.forEachIndexed { pi, p ->
+                for (n in 1..p.cantidad)
+                    l.add(Pend(claveSing(ti, pi, n), estado(conteo[carpeta(t, p, n)]), "%s%02d · %s · %s".format(t.prefijo, n, p.nombre, t.nombre)))
+            }
+        }
+        insps.forEachIndexed { ii, _ ->
+            elementosDe(insps[ii].nodo).forEach { (r, _) ->
+                val c = claveNodo(ii, r)
+                l.add(Pend(c, estado(conteo[carpetaNodo(ii, r)]), destDe(c)?.titulo ?: c))
+            }
+        }
+        return l
+    }
+
+    /** Tarjeta de avance (toca = pendientes) y aviso de fotos sin respaldar en Drive. */
+    private fun tarjetasAvance(col: LinearLayout, conteo: Map<String, Pair<Int, Int>>) {
+        val l = avanceEvento(conteo)
+        if (l.isNotEmpty()) {
+            val ok = l.count { it.est == 2 }; val inc = l.count { it.est == 1 }; val sin = l.size - ok - inc
+            val pct = ok * 100 / l.size
+            val det = if (ok == l.size) "Todo completo ✓" else "$ok completas · $inc incompletas · $sin sin fotos · toca para ver pendientes"
+            col.addView(fila("🚦 Avance del evento: $pct %\n$det", { mostrarPendientes(l) }, ok to l.size) { mostrarPendientes(l) })
+        }
+        val sinRespaldo = fotosSinRespaldo(evento)
+        if (sinRespaldo > 0) {
+            val ult = prefs.getLong("drive_$evento", 0L)
+            val cuando = if (ult == 0L) "nunca respaldado"
+                         else "último: " + SimpleDateFormat("dd-MM HH:mm", Locale.getDefault()).format(Date(ult * 1000))
+            col.addView(fila("☁ $sinRespaldo foto(s) sin respaldar en Drive\n$cuando · toca para crear el ZIP y subirlo",
+                { exportarZip(false, drive = true) }) { exportarZip(false, drive = true) })
+        }
+    }
+
+    private fun mostrarPendientes(l: List<Pend>) {
+        val pend = l.filter { it.est != 2 }
+        if (pend.isEmpty()) { aviso("Todo completo ✓"); return }
+        val textos = pend.map { (if (it.est == 0) "○  " else "◐  ") + it.etiqueta + if (it.est == 0) "  — sin fotos" else "  — incompleta" }
+        mostrar(AlertDialog.Builder(this).setTitle("Pendientes (${pend.size})")
+            .setItems(textos.toTypedArray()) { _, i ->
+                val c = pend[i].clave
+                irA(c); render(); menuElemento(c)
+            }
+            .setNegativeButton("Cerrar", null).create())
+    }
+
+    /** Fotos del evento agregadas después del último respaldo en Drive. */
+    private fun fotosSinRespaldo(ev: String): Int {
+        val desde = prefs.getLong("drive_$ev", 0L)
+        return runCatching {
+            contentResolver.query(coleccion, arrayOf(MediaStore.MediaColumns._ID),
+                "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.DATE_ADDED} > ?" + soloImagenes,
+                arrayOf("$raiz/$ev/%", desde.toString()), null)?.use { it.count } ?: 0
+        }.getOrDefault(0)
+    }
+
+    private fun borrarRespaldosAnteriores(ev: String) {
+        runCatching {
+            contentResolver.delete(coleccion,
+                "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?",
+                arrayOf(carpetaExport, "BoilerImage $ev respaldo %.zip"))
+        }
+    }
+
+    /** Abre Google Drive con el ZIP para subirlo (si no está Drive, el menú de compartir). */
+    private fun subirADrive(uri: Uri, detalle: String) {
+        val i = Intent(Intent.ACTION_SEND).setType("application/zip")
+            .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        aviso("Respaldo listo ($detalle). Elige la carpeta en Drive y toca Guardar.")
+        runCatching { startActivity(Intent(i).setPackage("com.google.android.apps.docs")) }
+            .onFailure {
+                runCatching { startActivity(Intent.createChooser(i, "Subir respaldo")) }
+                    .onFailure { aviso("No hay app para subir el ZIP") }
+            }
     }
 
     private fun exportarExcel() {
@@ -4155,7 +4248,7 @@ class MainActivity : AppCompatActivity() {
         "⌨️" to R.drawable.ic_teclado, "⌨" to R.drawable.ic_teclado, "←" to R.drawable.ic_volver,
         "＋" to R.drawable.ic_agregar, "✕" to R.drawable.ic_cerrar, "✓" to R.drawable.ic_listo,
         "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento, "📐" to R.drawable.ic_regla, "📦" to R.drawable.ic_zip,
-        "🌳" to R.drawable.ic_arbol, "🚦" to R.drawable.ic_estado)
+        "🌳" to R.drawable.ic_arbol, "🚦" to R.drawable.ic_estado, "☁" to R.drawable.ic_nube)
 
     /** Separa un emoji inicial del texto: (ícono, texto limpio). */
     private fun separarIcono(s: String): Pair<Int?, String> {
