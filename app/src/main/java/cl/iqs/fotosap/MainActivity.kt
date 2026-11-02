@@ -204,7 +204,21 @@ class MainActivity : AppCompatActivity() {
         get() = prefs.getString("selCelda", null)
         set(v) { prefs.edit().putString("selCelda", v).apply() }
 
-    private val camara = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+    private val camara = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok -> alVolverCamara(ok) }
+
+    /** Foto única con la cámara BoilerImage (espesores, medidor, nombre); si no abre, se usa la del teléfono. */
+    private val camaraUnica = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val error = res.data?.getStringExtra("error")
+        val u = prefs.getString("pendUri", null)?.let(Uri::parse)
+        if (res.resultCode != RESULT_OK && error != null && u != null) {
+            aviso("No se pudo abrir la cámara BoilerImage ($error). Se usa la del teléfono.")
+            try { camara.launch(u) } catch (e: Exception) { alVolverCamara(false) }
+            return
+        }
+        alVolverCamara(res.resultCode == RESULT_OK)
+    }
+
+    private fun alVolverCamara(ok: Boolean) {
         val uri = prefs.getString("pendUri", null)?.let(Uri::parse)
         val modo = prefs.getString("pendModo", "") ?: ""
         val clave = prefs.getString("pendClave", "") ?: ""
@@ -213,11 +227,11 @@ class MainActivity : AppCompatActivity() {
 
         if (modo == "nombre") {
             if (ok && uri != null) leerNombreDe(uri, true) else uri?.let { runCatching { contentResolver.delete(it, null, null) } }
-            return@registerForActivityResult
+            return
         }
         if (modo == "medBase" || modo == "medidor") {
             alVolverCamaraMed(modo, ok, uri)
-            return@registerForActivityResult
+            return
         }
 
         if (!ok) {
@@ -225,7 +239,7 @@ class MainActivity : AppCompatActivity() {
         } else if (modo == "detalle" && destDe(clave) != null) {
             // Modo ráfaga: vuelve a abrir la cámara hasta que el usuario cancele
             tomarFotoSistema(clave, "detalle")
-            return@registerForActivityResult
+            return
         }
         if (clave.isNotEmpty()) irA(clave)
         render()
@@ -1613,9 +1627,37 @@ class MainActivity : AppCompatActivity() {
         }
         fun X(v: Float) = r.left + v * r.width()
         fun Y(v: Float) = r.top + v * r.height()
+        fun largo(m: Marca) = Math.hypot(((m.x2 - m.x1) * r.width()).toDouble(), ((m.y2 - m.y1) * r.height()).toDouble())
+        val ref = marcas.firstOrNull { it.tipo == "ref" }
+        val refMm = ref?.texto?.replace(',', '.')?.toDoubleOrNull()
+        fun etiqueta(t: String, x: Float, y: Float, color: Int) {
+            val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = lado * 0.032f; typeface = Typeface.DEFAULT_BOLD; this.color = color }
+            val fm = tp.fontMetrics; val ancho = tp.measureText(t); val pad = tp.textSize * 0.3f
+            val x0 = (x - ancho / 2 - pad).coerceIn(r.left, maxOf(r.left, r.right - ancho - 2 * pad))
+            val y0 = (y - lado * 0.02f).coerceIn(r.top - fm.ascent + pad, r.bottom - fm.descent - pad)
+            c.drawRoundRect(x0, y0 + fm.ascent - pad, x0 + ancho + 2 * pad, y0 + fm.descent + pad, pad, pad,
+                Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = Color.argb(185, 0, 0, 0) })
+            c.drawText(t, x0 + pad, y0, tp)
+        }
+        fun cota(m: Marca, texto: String) {
+            val ax = X(m.x1); val ay = Y(m.y1); val bx = X(m.x2); val by = Y(m.y2)
+            c.drawLine(ax, ay, bx, by, p)
+            val ang = Math.atan2((by - ay).toDouble(), (bx - ax).toDouble()) + Math.PI / 2
+            val t = grosor * 3.5
+            for ((x, y) in listOf(ax to ay, bx to by))
+                c.drawLine((x - t * Math.cos(ang)).toFloat(), (y - t * Math.sin(ang)).toFloat(),
+                           (x + t * Math.cos(ang)).toFloat(), (y + t * Math.sin(ang)).toFloat(), p)
+            etiqueta(texto, (ax + bx) / 2, minOf(ay, by), p.color)
+        }
+        fun mm(v: Double) = (if (v >= 100) "%.0f" else "%.1f").format(v).replace('.', ',') + " mm"
         for (m in marcas) {
             p.color = m.color
             when (m.tipo) {
+                "ref" -> { p.color = Color.parseColor("#00E5FF"); cota(m, "REF " + (refMm?.let { mm(it) } ?: m.texto)) }
+                "cota" -> {
+                    val lr = ref?.let { largo(it) } ?: 0.0
+                    cota(m, if (refMm != null && lr > 0) mm(largo(m) / lr * refMm) else "? mm")
+                }
                 "circulo" -> c.drawOval(minOf(X(m.x1), X(m.x2)), minOf(Y(m.y1), Y(m.y2)),
                                         maxOf(X(m.x1), X(m.x2)), maxOf(Y(m.y1), Y(m.y2)), p)
                 "flecha" -> {
@@ -1664,13 +1706,18 @@ class MainActivity : AppCompatActivity() {
                 b.background = fondoRedondeado(if (activo) C.acento else Color.parseColor("#1C2A3A"), 12)
                 val col = if (activo) C.tinta else Color.WHITE
                 ((b.getChildAt(0)) as ImageView).setImageDrawable(icono(
-                    when (k) { "circulo" -> R.drawable.ic_circulo; "flecha" -> R.drawable.ic_flecha; else -> R.drawable.ic_texto }, col, 26))
+                    when (k) { "circulo" -> R.drawable.ic_circulo; "flecha" -> R.drawable.ic_flecha; "medir" -> R.drawable.ic_regla; else -> R.drawable.ic_texto }, col, 26))
                 ((b.getChildAt(1)) as TextView).setTextColor(col)
             }
             (botonColor.getChildAt(0) as ImageView).setImageDrawable(icono(R.drawable.ic_color, vista.color, 26))
         }
-        for ((k, nombre) in listOf("circulo" to "Círculo", "flecha" to "Flecha", "texto" to "Texto")) {
-            val b = accionOscura(R.drawable.ic_circulo, nombre) { vista.herramienta = k; refrescar() }
+        for ((k, nombre) in listOf("circulo" to "Círculo", "flecha" to "Flecha", "texto" to "Texto", "medir" to "Medir")) {
+            val b = accionOscura(R.drawable.ic_circulo, nombre) {
+                vista.herramienta = k; refrescar()
+                if (k == "medir") aviso(if (vista.marcas.none { it.tipo == "ref" })
+                    "Medir: primero arrastra sobre algo de medida conocida (ej. diámetro del tubo)"
+                    else "Medir: arrastra sobre lo que quieres medir")
+            }
             botonesH[k] = b; herramientas.addView(b)
         }
         botonColor = accionOscura(R.drawable.ic_color, "Color") {
@@ -1702,6 +1749,26 @@ class MainActivity : AppCompatActivity() {
         raizV.addView(herramientas)
         raizV.addView(acciones.apply { setPadding(dp(4), 0, dp(4), dp(8)) })
 
+        vista.pedirReferencia = { m ->
+            val et = EditText(this).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                hint = "mm"; setText(prefs.getString("ultima_ref_mm", "") ?: ""); setSelection(text.length)
+            }
+            val col = columna()
+            col.addView(texto("Medida real de la línea que trazaste, en mm.\nEj.: diámetro exterior del tubo 63,5 · ancho de la membrana 12,7", 13f))
+            col.addView(et)
+            col.addView(texto("Las medidas son aproximadas y valen para objetos en el mismo plano y a la misma distancia que la referencia (foto lo más perpendicular posible).", 12f))
+            mostrar(AlertDialog.Builder(this).setTitle("Referencia").setView(col)
+                .setPositiveButton("Usar") { _, _ ->
+                    val v = et.text.toString().trim().replace(',', '.').toDoubleOrNull()
+                    if (v == null || v <= 0) { aviso("Ingresa un número mayor que 0"); return@setPositiveButton }
+                    val t = et.text.toString().trim().replace('.', ',')
+                    prefs.edit().putString("ultima_ref_mm", t).apply()
+                    vista.marcas.add(Marca("ref", m.x1, m.y1, m.x2, m.y2, m.color, t)); vista.invalidate()
+                    aviso("Referencia lista. Ahora arrastra sobre lo que quieres medir")
+                }
+                .setNegativeButton("Cancelar", null).create())
+        }
         vista.pedirTexto = { x, y ->
             val et = EditText(this).apply {
                 hint = "Ej.: grieta, desgaste, 4,2 mm"
@@ -1748,6 +1815,7 @@ class MainActivity : AppCompatActivity() {
         var herramienta = "circulo"
         var color = coloresMarca[0]
         var pedirTexto: (Float, Float) -> Unit = { _, _ -> }
+        var pedirReferencia: (Marca) -> Unit = { }
         private var actual: Marca? = null
         private var rect = RectF()
         private val pintura = Paint(Paint.FILTER_BITMAP_FLAG)
@@ -1768,7 +1836,10 @@ class MainActivity : AppCompatActivity() {
         override fun onTouchEvent(e: MotionEvent): Boolean {
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    if (herramienta != "texto") actual = Marca(herramienta, nx(e.x), ny(e.y), nx(e.x), ny(e.y), color)
+                    if (herramienta != "texto") {
+                        val tipo = if (herramienta == "medir") (if (marcas.any { it.tipo == "ref" }) "cota" else "ref") else herramienta
+                        actual = Marca(tipo, nx(e.x), ny(e.y), nx(e.x), ny(e.y), color, if (tipo == "ref") "?" else "")
+                    }
                 }
                 MotionEvent.ACTION_MOVE -> actual?.let { it.x2 = nx(e.x); it.y2 = ny(e.y); invalidate() }
                 MotionEvent.ACTION_UP -> {
@@ -1777,7 +1848,9 @@ class MainActivity : AppCompatActivity() {
                     if (herramienta == "texto") { val x = nx(e.x); val y = ny(e.y); post { pedirTexto(x, y) } }
                     else if (m != null) {
                         val dx = (m.x2 - m.x1) * rect.width(); val dy = (m.y2 - m.y1) * rect.height()
-                        if (Math.hypot(dx.toDouble(), dy.toDouble()) > dp(16)) marcas.add(m)
+                        if (Math.hypot(dx.toDouble(), dy.toDouble()) > dp(16)) {
+                            if (m.tipo == "ref") { val mm = m; post { pedirReferencia(mm) } } else marcas.add(m)
+                        }
                         else if (m.tipo == "circulo") {
                             // toque corto: círculo de tamaño fijo centrado en el punto
                             val rx = dp(40) / rect.width(); val ry = dp(40) / rect.height()
@@ -3051,6 +3124,11 @@ class MainActivity : AppCompatActivity() {
 
     /** Tarjeta de avance (toca = pendientes) y aviso de fotos sin respaldar en Drive. */
     private fun tarjetasAvance(col: LinearLayout, conteo: Map<String, Pair<Int, Int>>) {
+        Equipo.aviso(this)?.let { a ->
+            col.addView(fila("⚠ Antes de entrar al hogar\n$a", { aviso("Carga el teléfono o libera espacio (respalda y borra eventos antiguos)") }) {
+                aviso("Carga el teléfono o libera espacio (respalda y borra eventos antiguos)")
+            })
+        }
         val l = avanceEvento(conteo)
         if (l.isNotEmpty()) {
             val ok = l.count { it.est == 2 }; val inc = l.count { it.est == 1 }; val sin = l.size - ok - inc
@@ -3414,6 +3492,17 @@ class MainActivity : AppCompatActivity() {
             if (modo == "medBase") { val s = sesionMed(); guardarSesionMed(null); volverDeMedicion(s) }
         }
         conCamara(siNo = { fallar() }) {
+            if (camaraPropia()) {
+                val (titulo, sub) = when (modo) {
+                    "medBase" -> "Foto de la zona" to "Espesores: después tocas cada punto medido"
+                    "medidor" -> "Foto del medidor" to "Encuadra la pantalla del medidor; la lectura es automática"
+                    "nombre" -> "Foto del nombre" to "Placa o rótulo con el nombre de la carpeta"
+                    else -> "Foto" to null
+                }
+                val i = Intent(this, CamaraActivity::class.java).putExtra("destino", uri.toString())
+                    .putExtra("titulo", titulo).putExtra("subtitulo", sub)
+                try { camaraUnica.launch(i); return@conCamara } catch (e: Exception) { /* sigue con la del teléfono */ }
+            }
             try { camara.launch(uri) }
             catch (e: Exception) { fallar(); aviso("No se encontró app de cámara") }
         }
