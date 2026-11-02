@@ -88,6 +88,8 @@ import java.util.concurrent.TimeUnit
  *  - Mantener presionado sobre la imagen: bloquea brillo y enfoque (AE/AF) hasta soltarlo.
  *  - Opciones (⋮): disparo estabilizado (espera a que el teléfono esté quieto), flash al disparar,
  *    cuadrícula, nivel y macro automática (pasa al gran angular 0,6× cuando el objeto está muy cerca).
+ *  - Foto única (extra "destino" = uri): para la foto de espesores, del medidor o del nombre; devuelve RESULT_OK al guardarla.
+ *  - Al abrir avisa si queda poca batería o poco espacio.
  *  - Pendientes: "faltan X de N" en la pared y botón ⏭ para saltar a la siguiente sin completar.
  *  - ★ junto a la miniatura: marca la última foto "para informe" (archivo Para informe.txt de la carpeta).
  *  - Resolución Normal (12 MP) o Máxima; modos HDR / Noche si el teléfono los ofrece.
@@ -165,6 +167,8 @@ class CamaraActivity : AppCompatActivity() {
     private lateinit var lupa: ImageView
     private lateinit var btnEstrella: TextView
     private var ultimaRuta = ""
+    private var destino: Uri? = null      // modo foto única
+    private lateinit var fila2V: View
     private lateinit var btnPendiente: TextView
     private var conteoRutas: Map<String, Pair<Int, Int>> = emptyMap()   // ruta → (generales, otras), como en la pantalla principal
     private var ultimaEstrella = false
@@ -206,9 +210,15 @@ class CamaraActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        rutas = intent.getStringArrayListExtra("rutas") ?: arrayListOf()
-        codigos = intent.getStringArrayListExtra("codigos") ?: arrayListOf()
-        titulos = intent.getStringArrayListExtra("titulos") ?: arrayListOf()
+        destino = intent.getStringExtra("destino")?.let { Uri.parse(it) }
+        if (destino != null) {
+            rutas = listOf(""); codigos = listOf("")
+            titulos = listOf(intent.getStringExtra("titulo") ?: "Foto")
+        } else {
+            rutas = intent.getStringArrayListExtra("rutas") ?: arrayListOf()
+            codigos = intent.getStringArrayListExtra("codigos") ?: arrayListOf()
+            titulos = intent.getStringArrayListExtra("titulos") ?: arrayListOf()
+        }
         if (rutas.isEmpty() || rutas.size != codigos.size || rutas.size != titulos.size) { finish(); return }
         indice = (savedInstanceState?.getInt("indice") ?: intent.getIntExtra("indice", 0)).coerceIn(0, rutas.size - 1)
         modo = savedInstanceState?.getString("modo") ?: intent.getStringExtra("modo") ?: "general"
@@ -278,6 +288,7 @@ class CamaraActivity : AppCompatActivity() {
     }
 
     private fun terminar() {
+        if (destino != null) { setResult(RESULT_CANCELED); finish(); return }
         setResult(RESULT_OK, Intent().putExtra("indice", indice).putExtra("fotos", fotosTomadas))
         finish()
     }
@@ -385,6 +396,7 @@ class CamaraActivity : AppCompatActivity() {
         btnPendiente = chip("⏭") { saltarPendiente() }.apply { contentDescription = "Siguiente pendiente"; setPadding(0, 0, 0, 0) }
         fila2.addView(btnPendiente, LinearLayout.LayoutParams(dp(50), dp(48)))
         arriba.addView(fila2)
+        fila2V = fila2
         raiz.addView(arriba, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
 
         // --- Abajo: lentes flotando sobre la imagen y fila de disparo ---
@@ -537,12 +549,22 @@ class CamaraActivity : AppCompatActivity() {
             true
         }
         setContentView(raiz)
+        if (destino != null) {
+            fila2V.visibility = View.GONE; btnEstrella.visibility = View.GONE; miniatura.visibility = View.INVISIBLE
+        }
         recontar()
         refrescar()
+        Equipo.aviso(this)?.let { a ->
+            vista.post {
+                mostrarAviso("⚠ $a")
+                manejador.postDelayed({ if (!bloqueado && !macroAuto && txtAviso.text.startsWith("⚠")) txtAviso.visibility = View.GONE }, 6000)
+            }
+        }
     }
 
     /** Fotos por carpeta de todas las singularidades del recorrido (una sola consulta). */
     private fun recontar() {
+        if (destino != null) return
         var pre = rutas.reduce { a, b -> a.commonPrefixWith(b) }
         pre = pre.substring(0, pre.lastIndexOf('/') + 1)
         val res = HashMap<String, Pair<Int, Int>>()
@@ -592,26 +614,29 @@ class CamaraActivity : AppCompatActivity() {
 
     private fun refrescar() {
         txtTitulo.text = titulos[indice]
-        val (g, d) = conteoRutas[rutas[indice]] ?: (0 to 0)
-        val grupo = grupoDe(indice)
-        val delGrupo = rutas.indices.filter { grupoDe(it) == grupo }
-        val faltan = delGrupo.count { estadoDe(it) != 2 }
-        txtConteo.text = "Gen: $g · Det: $d · " + (if (faltan == 0) "pared completa ✓" else "faltan $faltan de ${delGrupo.size}") +
-            if (fotosTomadas > 0) " · $fotosTomadas en sesión" else ""
-        val hayPend = rutas.indices.any { estadoDe(it) != 2 }
-        btnPendiente.alpha = if (hayPend) 1f else 0.35f
-        // solo el código; si el salto cambia de pared, se agrega la pared (en otra línea)
-        fun etiqueta(j: Int): String {
-            val pared = titulos[j].substringAfter(" · ")
-            return if (pared == titulos[indice].substringAfter(" · ")) codigos[j] else "${codigos[j]}\n$pared"
+        if (destino != null) txtConteo.text = intent.getStringExtra("subtitulo") ?: "Una foto · disparador o teclas de volumen"
+        else {
+            val (g, d) = conteoRutas[rutas[indice]] ?: (0 to 0)
+            val grupo = grupoDe(indice)
+            val delGrupo = rutas.indices.filter { grupoDe(it) == grupo }
+            val faltan = delGrupo.count { estadoDe(it) != 2 }
+            txtConteo.text = "Gen: $g · Det: $d · " + (if (faltan == 0) "pared completa ✓" else "faltan $faltan de ${delGrupo.size}") +
+                if (fotosTomadas > 0) " · $fotosTomadas en sesión" else ""
+            val hayPend = rutas.indices.any { estadoDe(it) != 2 }
+            btnPendiente.alpha = if (hayPend) 1f else 0.35f
+            // solo el código; si el salto cambia de pared, se agrega la pared (en otra línea)
+            fun etiqueta(j: Int): String {
+                val pared = titulos[j].substringAfter(" · ")
+                return if (pared == titulos[indice].substringAfter(" · ")) codigos[j] else "${codigos[j]}\n$pared"
+            }
+            btnAnterior.text = if (indice > 0) "‹  ${etiqueta(indice - 1)}" else "—"
+            btnSiguiente.text = if (indice < rutas.size - 1) "${etiqueta(indice + 1)}  ›" else "—"
+            for (b in listOf(btnAnterior, btnSiguiente)) { b.maxLines = 2; b.textSize = if (b.text.contains('\n')) 11f else 15f }
+            btnAnterior.alpha = if (indice > 0) 1f else 0.35f
+            btnSiguiente.alpha = if (indice < rutas.size - 1) 1f else 0.35f
+            estiloChip(btnGeneral, modo == "general")
+            estiloChip(btnDetalle, modo == "detalle")
         }
-        btnAnterior.text = if (indice > 0) "‹  ${etiqueta(indice - 1)}" else "—"
-        btnSiguiente.text = if (indice < rutas.size - 1) "${etiqueta(indice + 1)}  ›" else "—"
-        for (b in listOf(btnAnterior, btnSiguiente)) { b.maxLines = 2; b.textSize = if (b.text.contains('\n')) 11f else 15f }
-        btnAnterior.alpha = if (indice > 0) 1f else 0.35f
-        btnSiguiente.alpha = if (indice < rutas.size - 1) 1f else 0.35f
-        estiloChip(btnGeneral, modo == "general")
-        estiloChip(btnDetalle, modo == "detalle")
         btnRes.text = captura?.resolutionInfo?.resolution?.let { "${mp(it)} MP" }
             ?: if (prefs.getString("cam_res", "normal") == "max") "Máx" else "12 MP"
         btnExt.text = nombreExt(extActual)
@@ -1229,6 +1254,7 @@ class CamaraActivity : AppCompatActivity() {
 
     private fun capturar() {
         val cap = captura ?: run { ocupado = false; return }
+        destino?.let { capturarUnica(cap, it); return }
         val ruta = rutas[indice]
         val pre = "${codigos[indice]}_${modo}_"
         val existentes = nombresEn(ruta)
@@ -1263,6 +1289,28 @@ class CamaraActivity : AppCompatActivity() {
                 aviso("No se pudo guardar la foto: ${e.message}")
             }
         })
+    }
+
+    /** Foto única: se escribe en la uri recibida y se vuelve a la pantalla que la pidió. */
+    private fun capturarUnica(cap: ImageCapture, u: Uri) {
+        val salida = runCatching { contentResolver.openOutputStream(u, "wt") }.getOrNull()
+            ?: run { ocupado = false; aviso("No se pudo crear el archivo"); return }
+        destello.alpha = 0.8f
+        destello.animate().alpha(0f).setDuration(250).start()
+        runCatching { sonido.play(MediaActionSound.SHUTTER_CLICK) }
+        cap.takePicture(ImageCapture.OutputFileOptions.Builder(salida).build(), ContextCompat.getMainExecutor(this),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(r: ImageCapture.OutputFileResults) {
+                    runCatching { salida.close() }
+                    setResult(RESULT_OK, Intent().putExtra("destino", u.toString()))
+                    finish()
+                }
+                override fun onError(e: ImageCaptureException) {
+                    runCatching { salida.close() }
+                    ocupado = false
+                    aviso("No se pudo guardar la foto: ${e.message}")
+                }
+            })
     }
 
     /** Ver la última foto en grande, con opción de eliminarla. */
