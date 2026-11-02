@@ -24,7 +24,8 @@ tap() { b=$(buscar "$1"); echo "tap '$1' -> $b"; [ -n "$b" ] && adb shell input 
 textos() { dump; grep -o 'text="[^"]*"' $OUT/ui.xml | grep -v 'text=""' | tr '\n' ' '; echo; }
 RUTA="Documents/BoilerImage/Prueba/Aires Primarios/Frontal/AP 01/"
 abrir() {
-  adb shell am start -n $PKG/.CamaraActivity --esal rutas "'$RUTA'" --esal codigos AP01 --esal titulos "'AP01 · Frontal'" --es modo general
+  R2="Documents/BoilerImage/Prueba/Aires Primarios/Frontal/AP 02/"; R3="Documents/BoilerImage/Prueba/Aires Primarios/Trasera/AP 03/"
+  adb shell am start -n $PKG/.CamaraActivity --esal rutas "'$RUTA,$R2,$R3'" --esal codigos AP01,AP02,AP03 --esal titulos "'AP01 · Frontal,AP02 · Frontal,AP03 · Trasera'" --es modo general
   sleep 7
 }
 foto() { tap "tomar foto" 5; }
@@ -77,9 +78,15 @@ tap "tocar aquí para soltar" 2; cap desbloqueo
 foto; tap "marcar la última foto para informe" 2; cap estrella
 tap "=−" 1; sleep 2; cap lupa; tap "enfoque automático" 2; tap "=enfoque" 2
 
+# --- v4.6: pendientes ---
+textos > $OUT/textos_pend.txt; cap pendientes_ap01
+tap "siguiente pendiente" 2; cap pendiente_salto; textos > $OUT/textos_salto.txt
+foto; cap pendiente_foto; textos > $OUT/textos_foto.txt
+tap "siguiente pendiente" 2; cap pendiente_salto2; textos > $OUT/textos_salto2.txt
+
 # --- Reabrir: el brillo debe recordarse ---
 adb shell input keyevent KEYCODE_BACK; sleep 2
-abrir; cap reabrir; echo "textos reabrir: $(textos)"
+abrir; cap reabrir; echo "textos reabrir: $(textos)" | tee $OUT/textos_reabrir.txt
 tap "=brillo" 2; tap "volver el brillo a 0" 2; adb shell input keyevent KEYCODE_BACK; sleep 2
 
 adb pull "/sdcard/$RUTA" $OUT/fotos >/dev/null 2>&1
