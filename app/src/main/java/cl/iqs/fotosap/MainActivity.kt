@@ -67,6 +67,23 @@ class MainActivity : AppCompatActivity() {
     private var notaEditando: EditText? = null
 
     // Elegir archivo de respaldo para restaurar
+    /** Carpeta de la nube vinculada (OneDrive u otra app que ofrezca carpetas): el respaldo se copia ahí solo. */
+    private val vincularCarpeta = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }.onFailure { aviso("Esa carpeta no permite acceso permanente: ${it.message}"); return@registerForActivityResult }
+        val nombre = nombreCarpetaNube(uri)
+        prefs.edit().putString("nube_tree", uri.toString()).putString("nube_tree_nombre", nombre).apply()
+        val esOneDrive = esOneDrive(uri)
+        mostrar(AlertDialog.Builder(this).setTitle("Carpeta vinculada")
+            .setMessage("Los respaldos se copiarán automáticamente en:\n$nombre" +
+                (if (esOneDrive) "\n\n(OneDrive)" else "\n\nOjo: esta carpeta no parece ser de OneDrive. Se usará igual."))
+            .setPositiveButton("OK", null).create())
+        render()
+    }
+
     private val abrirRespaldo = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) restaurarDesde(uri)
     }
@@ -74,7 +91,7 @@ class MainActivity : AppCompatActivity() {
     // Respaldo automático cada vez que cambia la configuración
     private var respaldoPendiente = false
     private val alCambiarPrefs = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, clave ->
-        if (clave == null || clave.startsWith("pend") || clave == "respaldo_uri" || respaldoPendiente) return@OnSharedPreferenceChangeListener
+        if (clave == null || clave.startsWith("pend") || clave == "respaldo_uri" || clave.startsWith("nube_tree") || respaldoPendiente) return@OnSharedPreferenceChangeListener
         respaldoPendiente = true
         android.os.Handler(android.os.Looper.getMainLooper())
             .postDelayed({ respaldoPendiente = false; respaldar(false) }, 1500)
@@ -453,6 +470,15 @@ class MainActivity : AppCompatActivity() {
             prefs.edit().putBoolean("camaraPropia", i == 0).apply()
             render()
         })
+        col.addView(selector("☁", "Respaldo en", listOf("Google Drive", "OneDrive"), if (nube() == "onedrive") 1 else 0) { i ->
+            prefs.edit().putString("nube", if (i == 1) "onedrive" else "drive").apply()
+            render()
+        })
+        if (nube() == "onedrive") {
+            val vinc = prefs.getString("nube_tree_nombre", null)
+            col.addView(boton(if (vinc == null) "☁  Vincular carpeta de OneDrive\nLos respaldos se suben solos, sin tocar nada"
+                              else "☁  OneDrive vinculado: $vinc\nToca para cambiar o desvincular") { menuOneDrive() })
+        }
         col.addView(espacio(20))
         col.addView(texto("Carpeta en el teléfono:\nAlmacenamiento interno > $raiz", 13f))
         setContentView(scroll(col))
@@ -2141,7 +2167,7 @@ class MainActivity : AppCompatActivity() {
         o.put("app", "BoilerImage").put("version", 1).put("fecha", System.currentTimeMillis())
         val datos = JSONObject()
         for ((k, v) in prefs.all) {
-            if (k.startsWith("pend") || k == "respaldo_uri" || v == null) continue
+            if (k.startsWith("pend") || k == "respaldo_uri" || k.startsWith("nube_tree") || v == null) continue
             val t = when (v) {
                 is String -> "s"; is Int -> "i"; is Long -> "l"; is Boolean -> "b"; is Float -> "f"
                 else -> continue
@@ -2898,7 +2924,7 @@ class MainActivity : AppCompatActivity() {
         menuGrande("Exportar evento (ZIP)", listOf(
             "📦  Evento completo\nTodas las fotos, notas y Excel" to { exportarZip(false) },
             "🖼  Solo para informe\nGenerales, marcadas, ★ informe, espesores y RA (sin detalles ni originales)" to { exportarZip(true) },
-            "☁  Respaldar en Google Drive\nZIP completo y se abre Drive para subirlo" to { exportarZip(false, drive = true) }))
+            "☁  Respaldar en ${nombreNube()}\n" + (if (carpetaNube() != null) "ZIP completo, se copia solo a la carpeta vinculada" else "ZIP completo y se abre ${nombreNube()} para subirlo") to { exportarZip(false, drive = true) }))
     }
 
     private val estrellasZip = HashMap<String, Set<String>>()
@@ -2986,12 +3012,7 @@ class MainActivity : AppCompatActivity() {
                 runCatching { espera.dismiss() }
                 res.onFailure { if (it.message != "cancelado") aviso("No se pudo crear el ZIP: ${it.message}") else aviso("ZIP cancelado") }
                 res.getOrNull()?.let { (uri, nombre, detalle) ->
-                    if (drive) {
-                        prefs.edit().putLong("drive_$ev", System.currentTimeMillis() / 1000).apply()
-                        subirADrive(uri, detalle)
-                        render()
-                        return@let
-                    }
+                    if (drive) { subirANube(ev, uri, nombre, detalle); return@let }
                     mostrar(AlertDialog.Builder(this).setTitle("ZIP listo")
                         .setMessage("$detalle\n\n$carpetaExport$nombre\n\nPor USB: Documents › BoilerImage › Exportaciones")
                         .setPositiveButton("Compartir") { _, _ ->
@@ -3042,7 +3063,7 @@ class MainActivity : AppCompatActivity() {
             val ult = prefs.getLong("drive_$evento", 0L)
             val cuando = if (ult == 0L) "nunca respaldado"
                          else "último: " + SimpleDateFormat("dd-MM HH:mm", Locale.getDefault()).format(Date(ult * 1000))
-            col.addView(fila("☁ $sinRespaldo foto(s) sin respaldar en Drive\n$cuando · toca para crear el ZIP y subirlo",
+            col.addView(fila("☁ $sinRespaldo foto(s) sin respaldar en ${nombreNube()}\n$cuando · toca para crear el ZIP y subirlo",
                 { exportarZip(false, drive = true) }) { exportarZip(false, drive = true) })
         }
     }
@@ -3077,12 +3098,88 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Abre Google Drive con el ZIP para subirlo (si no está Drive, el menú de compartir). */
-    private fun subirADrive(uri: Uri, detalle: String) {
+    private fun nube() = prefs.getString("nube", "drive") ?: "drive"
+    private fun nombreNube() = if (nube() == "onedrive") "OneDrive" else "Drive"
+    private fun paqueteNube() = if (nube() == "onedrive") "com.microsoft.skydrive" else "com.google.android.apps.docs"
+
+    /** Carpeta vinculada (solo con OneDrive elegido) si todavía tenemos permiso sobre ella. */
+    private fun carpetaNube(): Uri? {
+        if (nube() != "onedrive") return null
+        val u = prefs.getString("nube_tree", null)?.let { Uri.parse(it) } ?: return null
+        return if (contentResolver.persistedUriPermissions.any { it.uri == u && it.isWritePermission }) u else null
+    }
+
+    private fun esOneDrive(u: Uri) = (u.authority ?: "").let { it.contains("skydrive", true) || it.contains("onedrive", true) || it.contains("microsoft", true) }
+
+    private fun nombreCarpetaNube(tree: Uri): String = runCatching {
+        val doc = android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, android.provider.DocumentsContract.getTreeDocumentId(tree))
+        contentResolver.query(doc, arrayOf(android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst()) it.getString(0) else null
+        }
+    }.getOrNull() ?: "carpeta elegida"
+
+    private fun menuOneDrive() {
+        val vinc = prefs.getString("nube_tree_nombre", null)
+        val ops = mutableListOf<Pair<String, () -> Unit>>(
+            "☁  ${if (vinc == null) "Vincular" else "Cambiar"} carpeta\nEn el selector abre el menú ☰, elige OneDrive y la carpeta de respaldo" to {
+                aviso("Elige OneDrive en el menú ☰ y luego la carpeta"); runCatching { vincularCarpeta.launch(null) }
+                    .onFailure { aviso("No se pudo abrir el selector de carpetas") }
+            })
+        if (vinc != null) ops.add("✕  Desvincular\nVolver a subir con la app de OneDrive (compartir)" to {
+            prefs.getString("nube_tree", null)?.let { u ->
+                runCatching { contentResolver.releasePersistableUriPermission(Uri.parse(u),
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+            }
+            prefs.edit().remove("nube_tree").remove("nube_tree_nombre").apply()
+            aviso("OneDrive desvinculado"); render()
+        })
+        menuGrande("OneDrive", ops)
+    }
+
+    /** Sube el ZIP: copia directa a la carpeta vinculada o, si no hay, abre la app de Drive / OneDrive. */
+    private fun subirANube(ev: String, uri: Uri, nombre: String, detalle: String) {
+        val carpeta = carpetaNube()
+        if (carpeta == null) {
+            prefs.edit().putLong("drive_$ev", System.currentTimeMillis() / 1000).apply()
+            render()
+            compartirANube(uri, detalle)
+            return
+        }
+        val espera = AlertDialog.Builder(this).setTitle("Subiendo a ${nombreNube()}")
+            .setMessage("Copiando $nombre…\n$detalle").setCancelable(false).show()
+        Thread {
+            val r = runCatching {
+                val padre = android.provider.DocumentsContract.buildDocumentUriUsingTree(carpeta,
+                    android.provider.DocumentsContract.getTreeDocumentId(carpeta))
+                val nuevo = android.provider.DocumentsContract.createDocument(contentResolver, padre, "application/zip", nombre)
+                    ?: error("la carpeta no permite crear archivos")
+                contentResolver.openInputStream(uri)?.use { ins ->
+                    contentResolver.openOutputStream(nuevo, "w")?.use { out -> ins.copyTo(out, 1 shl 16) } ?: error("no se pudo escribir")
+                } ?: error("no se pudo leer el ZIP")
+                Unit
+            }
+            runOnUiThread {
+                runCatching { espera.dismiss() }
+                if (r.isSuccess) {
+                    prefs.edit().putLong("drive_$ev", System.currentTimeMillis() / 1000).apply()
+                    aviso("Respaldo copiado en ${prefs.getString("nube_tree_nombre", nombreNube())} ✓")
+                    render()
+                } else {
+                    aviso("No se pudo copiar a la carpeta vinculada (${r.exceptionOrNull()?.message}). Se abre ${nombreNube()}.")
+                    prefs.edit().putLong("drive_$ev", System.currentTimeMillis() / 1000).apply()
+                    render()
+                    compartirANube(uri, detalle)
+                }
+            }
+        }.start()
+    }
+
+    /** Abre la app de Drive / OneDrive con el ZIP (si no está instalada, el menú de compartir). */
+    private fun compartirANube(uri: Uri, detalle: String) {
         val i = Intent(Intent.ACTION_SEND).setType("application/zip")
             .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        aviso("Respaldo listo ($detalle). Elige la carpeta en Drive y toca Guardar.")
-        runCatching { startActivity(Intent(i).setPackage("com.google.android.apps.docs")) }
+        aviso("Respaldo listo ($detalle). Elige la carpeta en ${nombreNube()} y guarda.")
+        runCatching { startActivity(Intent(i).setPackage(paqueteNube())) }
             .onFailure {
                 runCatching { startActivity(Intent.createChooser(i, "Subir respaldo")) }
                     .onFailure { aviso("No hay app para subir el ZIP") }
