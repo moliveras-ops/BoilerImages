@@ -139,6 +139,7 @@ class CamaraActivity : AppCompatActivity() {
     private var brilloMin = 0
     private var brilloMax = 0
     private var brilloPaso = 0f     // EV por paso
+    private var brilloRecomendado = false   // aplicar −0,7 EV al conocer el paso de la cámara
     private lateinit var btnEnfoque: TextView
     private lateinit var panelEnfoque: LinearLayout
     private lateinit var barraEnfoque: SeekBar
@@ -148,6 +149,7 @@ class CamaraActivity : AppCompatActivity() {
     private var enfoque = 500                       // 0 = lo más cerca … PASOS_ENFOQUE = infinito
     private var dioptriasMin = 0f                   // 1 / distancia mínima en metros (0 = foco fijo)
     private val PASOS_ENFOQUE = 1000
+    private val BRILLO_RECOMENDADO = -0.7f   // EV: con linterna el metal y la escoria clara se queman
 
     // opciones (⋮)
     private var optEstab = true
@@ -208,8 +210,9 @@ class CamaraActivity : AppCompatActivity() {
         indice = (savedInstanceState?.getInt("indice") ?: intent.getIntExtra("indice", 0)).coerceIn(0, rutas.size - 1)
         modo = savedInstanceState?.getString("modo") ?: intent.getStringExtra("modo") ?: "general"
         fotosTomadas = savedInstanceState?.getInt("fotos") ?: 0
-        linterna = prefs.getBoolean("cam_linterna", false)
+        linterna = prefs.getBoolean("cam_linterna", true)
         brillo = prefs.getInt("cam_brillo", 0)
+        brilloRecomendado = !prefs.contains("cam_brillo")
         optEstab = prefs.getBoolean("cam_estab", true)
         optFlash = prefs.getBoolean("cam_flash", false)
         optGrilla = prefs.getBoolean("cam_grilla", true)
@@ -785,6 +788,11 @@ class CamaraActivity : AppCompatActivity() {
         brilloMax = e.exposureCompensationRange.upper
         brilloPaso = e.exposureCompensationStep.toFloat()
         btnBrillo.visibility = View.VISIBLE
+        if (brilloRecomendado && brilloPaso > 0f) {
+            brilloRecomendado = false
+            brillo = Math.round(BRILLO_RECOMENDADO / brilloPaso)
+            prefs.edit().putInt("cam_brillo", brillo.coerceIn(brilloMin, brilloMax)).apply()
+        }
         brillo = brillo.coerceIn(brilloMin, brilloMax)
         if (brillo != 0) runCatching { c.cameraControl.setExposureCompensationIndex(brillo) }
     }
@@ -961,7 +969,25 @@ class CamaraActivity : AppCompatActivity() {
                 if (!optMacro && macroAuto) salirMacro(false)
                 guia.invalidate()
             }
+            .setNeutralButton("Recomendada") { _, _ -> configuracionRecomendada() }
             .setNegativeButton("Cancelar", null).show()
+    }
+
+    /** Configuración recomendada para el interior de la caldera. */
+    private fun configuracionRecomendada() {
+        optEstab = true; optFlash = false; optGrilla = true; optNivel = true; optMacro = true
+        linterna = true; extActual = ExtensionMode.NONE
+        enfoqueManual = false
+        if (bloqueado) desbloquear(false)
+        if (macroAuto) salirMacro(false)
+        brilloRecomendado = true
+        prefs.edit().putBoolean("cam_estab", true).putBoolean("cam_flash", false).putBoolean("cam_grilla", true)
+            .putBoolean("cam_nivel", true).putBoolean("cam_macro", true).putBoolean("cam_linterna", true)
+            .putString("cam_res", "normal").putInt("cam_ext", ExtensionMode.NONE).apply()
+        lentesArmados = ""
+        vincular()
+        camara?.cameraControl?.setZoomRatio(1f)
+        aviso("Configuración recomendada: 12 MP · Normal · linterna · brillo −0,7 · AF")
     }
 
     // ---------- Macro automática ----------
