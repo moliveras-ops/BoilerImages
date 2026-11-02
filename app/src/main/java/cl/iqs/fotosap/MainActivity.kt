@@ -470,7 +470,7 @@ class MainActivity : AppCompatActivity() {
             prefs.edit().putBoolean("camaraPropia", i == 0).apply()
             render()
         })
-        col.addView(selector("☁", "Respaldo en", listOf("Google Drive", "OneDrive"), if (nube() == "onedrive") 1 else 0) { i ->
+        col.addView(selector("☁", "Nube", listOf("Google Drive", "OneDrive"), if (nube() == "onedrive") 1 else 0) { i ->
             prefs.edit().putString("nube", if (i == 1) "onedrive" else "drive").apply()
             render()
         })
