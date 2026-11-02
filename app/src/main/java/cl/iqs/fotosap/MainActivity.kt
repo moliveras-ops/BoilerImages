@@ -213,7 +213,7 @@ class MainActivity : AppCompatActivity() {
         if (res.resultCode != RESULT_OK && error != null && u != null) {
             aviso("No se pudo abrir la cámara BoilerImage ($error). Se usa la del teléfono.")
             try { camara.launch(u) } catch (e: Exception) { alVolverCamara(false) }
-            return
+            return@registerForActivityResult
         }
         alVolverCamara(res.resultCode == RESULT_OK)
     }
