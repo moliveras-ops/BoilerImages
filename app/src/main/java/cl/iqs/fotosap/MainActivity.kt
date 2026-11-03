@@ -4131,11 +4131,11 @@ class MainActivity : AppCompatActivity() {
         d.imagen(lb, true, lam.width, lam.height, 17.0, 23.0)
         lam.recycle()
         d.titulo("Resumen", 13)
-        d.tabla(listOf(listOf("ID", "Tipo", "Ubicación", "Elev. (m)", "Nivel", "Descripción")) +
+        d.tabla(listOf(listOf("ID", "Tipo", "Ubicación", "Elev. (m)", "Nivel", "Foto", "Descripción")) +
             p.hallazgos.mapIndexed { i, h -> listOf(Planos.codigo(i), Planos.tipo(h.tipo).nombre, h.ubicacion(),
-                Planos.num(h.elev, 2), if (h.nivel > 0) "N${h.nivel}" else "", h.desc) },
-            listOf(1.5, 2.8, 2.2, 1.8, 1.4, 7.3))
-        d.texto("T = tubo · M 12–13 = membrana entre los tubos 12 y 13 · N = nivel", 8, color = "5D6B78")
+                Planos.num(h.elev, 2), if (h.nivel > 0) "N${h.nivel}" else "", if (h.foto.isNotBlank()) "Sí" else "—", h.desc) },
+            listOf(1.4, 2.8, 2.1, 1.7, 1.3, 1.2, 6.5))
+        d.texto("T = tubo · M 12–13 = membrana entre los tubos 12 y 13 · N = nivel · Foto: Sí = con foto", 8, color = "5D6B78")
         p.hallazgos.forEachIndexed { i, h ->
             d.titulo("${Planos.codigo(i)} · ${Planos.tipo(h.tipo).nombre}", 13, saltoPagina = i % 2 == 0)
             d.tabla(listOf(

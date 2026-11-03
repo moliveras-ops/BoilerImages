@@ -328,28 +328,31 @@ object Planos {
 
         // Tabla de hallazgos
         val top = topTabla(p)
-        val cols = floatArrayOf(X0, X0 + 104f, X0 + 320f, X0 + 450f, X0 + 560f)
+        val cols = floatArrayOf(X0, X0 + 104f, X0 + 320f, X0 + 450f, X0 + 590f, X0 + 670f)
         c.drawRect(X0, top, X1, top + FILA, Paint().apply { color = acero })
         val cab = pinta(23f, Color.WHITE, true)
-        listOf("ID", "Tipo", "Ubicación", "Elev. (m)", "Descripción").forEachIndexed { i, s -> c.drawText(s, cols[i] + 10f, top + 27f, cab) }
+        listOf("ID", "Tipo", "Ubicación", "Elev. (m)", "Foto", "Descripción").forEachIndexed { i, s -> c.drawText(s, cols[i] + 10f, top + 27f, cab) }
         val celda = pinta(23f, tinta)
         val franja = Paint().apply { color = Color.parseColor("#F1F4F7") }
         p.hallazgos.forEachIndexed { i, h ->
             val y = top + FILA * (i + 1)
             if (i % 2 == 1) c.drawRect(X0, y, X1, y + FILA, franja)
             if (i == sel) c.drawRect(X0, y, X1, y + FILA, Paint().apply { color = Color.parseColor("#FFE3A3") })
-            val maxDesc = X1 - cols[4] - 16f
+            val maxDesc = X1 - cols[5] - 16f
             var d = h.desc.replace('\n', ' ')
             if (celda.measureText(d) > maxDesc) {
                 d = d.take(celda.breakText(d, true, maxDesc - celda.measureText("…"), null)).trimEnd() + "…"
             }
-            listOf(codigo(i), tipo(h.tipo).nombre, h.ubicacion(), num(h.elev) + (if (h.nivel > 0) " · N${h.nivel}" else ""), d)
-                .forEachIndexed { cI, s -> c.drawText(s, cols[cI] + 10f, y + 27f, celda) }
+            listOf(codigo(i), tipo(h.tipo).nombre, h.ubicacion(), num(h.elev) + (if (h.nivel > 0) " · N${h.nivel}" else ""), "", d)
+                .forEachIndexed { cI, s -> if (s.isNotEmpty()) c.drawText(s, cols[cI] + 10f, y + 27f, celda) }
+            // Foto: "Sí" en verde si el hallazgo tiene foto adjunta; "—" si no
+            if (h.foto.isNotBlank()) c.drawText("Sí", cols[4] + 10f, y + 27f, pinta(23f, Color.parseColor("#2E7D32"), true))
+            else c.drawText("—", cols[4] + 10f, y + 27f, pinta(23f, tenue))
         }
         val fin = top + FILA * (p.hallazgos.size + 1)
         c.drawLine(X0, fin, X1, fin, ejes)
         if (p.hallazgos.isEmpty()) c.drawText("Sin hallazgos", X0 + 10f, fin + 26f, celda.apply { color = tenue })
-        else c.drawText("T = tubo · M 12–13 = membrana entre los tubos 12 y 13 · N = nivel", X0 + 10f, fin + 26f, pinta(20f, tenue))
+        else c.drawText("T = tubo · M 12–13 = membrana entre tubos 12 y 13 · N = nivel · Con foto: ${p.hallazgos.count { it.foto.isNotBlank() }} de ${p.hallazgos.size}", X0 + 10f, fin + 26f, pinta(20f, tenue))
     }
 
     /** Imagen de la lámina para el informe, de [anchoPx] píxeles de ancho. */
