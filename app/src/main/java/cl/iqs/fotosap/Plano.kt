@@ -44,6 +44,7 @@ object Planos {
         TipoH("abol", "Abolladura", Color.parseColor("#E08A00"), "triangulo"),
         TipoH("eros", "Erosión", Color.parseColor("#1565C0"), "cuadrado"),
         TipoH("fisu", "Fisura", Color.parseColor("#7B1FA2"), "rombo"),
+        TipoH("grie", "Grieta", Color.parseColor("#D81B60"), "rayo"),
         TipoH("repa", "Reparación", Color.parseColor("#2E7D32"), "cruz"),
         TipoH("otro", "Otro", Color.parseColor("#546E7A"), "anillo"))
 
@@ -227,6 +228,9 @@ object Planos {
             "cuadrado" -> { c.drawRect(x - r, y - r, x + r, y + r, relleno); c.drawRect(x - r, y - r, x + r, y + r, borde) }
             "triangulo" -> poli(x, y - r * 1.25f, x + r * 1.15f, y + r * 0.85f, x - r * 1.15f, y + r * 0.85f).let { c.drawPath(it, relleno); c.drawPath(it, borde) }
             "rombo" -> poli(x, y - r * 1.3f, x + r * 1.1f, y, x, y + r * 1.3f, x - r * 1.1f, y).let { c.drawPath(it, relleno); c.drawPath(it, borde) }
+            "rayo" -> poli(x + r * 0.35f, y - r * 1.3f, x - r * 0.9f, y + r * 0.15f, x - r * 0.05f, y + r * 0.15f,
+                x - r * 0.35f, y + r * 1.3f, x + r * 0.9f, y - r * 0.15f, x + r * 0.05f, y - r * 0.15f)
+                .let { c.drawPath(it, relleno); c.drawPath(it, borde) }
             "cruz" -> {
                 val l = Paint(relleno).apply { style = Paint.Style.STROKE; strokeWidth = r * 0.55f; strokeCap = Paint.Cap.ROUND }
                 c.drawLine(x - r, y - r, x + r, y + r, l); c.drawLine(x - r, y + r, x + r, y - r, l)

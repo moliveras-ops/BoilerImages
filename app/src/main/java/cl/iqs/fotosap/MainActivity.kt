@@ -3750,7 +3750,7 @@ class MainActivity : AppCompatActivity() {
             fila.addView(c, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
             return e
         }
-        val eTubo = mitad("Tubo (1 a ${p.tubos})", "${base.tubo}", InputType.TYPE_CLASS_NUMBER)
+        val eTubo = mitad("Tubo (1 a ${p.tubos})", "${base.tubo}", InputType.TYPE_CLASS_PHONE)
         val etTubo = (eTubo.parent as LinearLayout).getChildAt(0) as TextView
         val eNivel = mitad("Nivel", if (base.nivel > 0) "${base.nivel}" else "", InputType.TYPE_CLASS_NUMBER)
         val eElev = mitad("Elevación (m)", Planos.num(base.elev),
@@ -3758,10 +3758,21 @@ class MainActivity : AppCompatActivity() {
         col.addView(fila)
         val ubic = texto("", 14f)
         col.addView(ubic)
+        /** Lee el campo Tubo: "20" → (20, null); "20-21" → (20, true = membrana); "20-25" → (null, true). */
+        fun leerTubo(): Pair<Int?, Boolean?> {
+            val s = eTubo.text.toString().trim()
+            val r = Regex("""^(\d+)\s*[-–—/ ]\s*(\d+)$""").find(s)
+            if (r != null) {
+                val a = r.groupValues[1].toInt(); val b = r.groupValues[2].toInt()
+                return (if (maxOf(a, b) - minOf(a, b) == 1) minOf(a, b) else null) to true
+            }
+            return s.toIntOrNull() to null
+        }
         fun actUbic() {
+            val (t, guion) = leerTubo()
             val m = grupo.checkedRadioButtonId == rMemb.id
             etTubo.text = if (m) "Tubo izquierdo (1 a ${p.tubos - 1})" else "Tubo (1 a ${p.tubos})"
-            val t = eTubo.text.toString().trim().toIntOrNull()
+            if (guion == true && t == null) { ubic.text = "→ Escribe dos tubos seguidos, ej. 20-21"; return }
             ubic.text = when {
                 t == null -> ""
                 m -> "→ Membrana entre los tubos $t y ${t + 1}  (M $t–${t + 1})"
@@ -3772,8 +3783,13 @@ class MainActivity : AppCompatActivity() {
         eTubo.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) = actUbic()
+            override fun afterTextChanged(s: android.text.Editable?) {
+                // "20-21" pasa solo a Membrana
+                if (leerTubo().second == true && grupo.checkedRadioButtonId != rMemb.id && rMemb.isEnabled) grupo.check(rMemb.id)
+                else actUbic()
+            }
         })
+        eTubo.hint = "ej. 20 o 20-21"
         actUbic()
         // Nivel con cota en la tabla del plano → completa la elevación
         eNivel.addTextChangedListener(object : android.text.TextWatcher {
@@ -3795,9 +3811,9 @@ class MainActivity : AppCompatActivity() {
         col.addView(boton("🎤  Dictar descripción") { dictar(eDesc) })
         val b = AlertDialog.Builder(this).setTitle(if (h == null) "Nuevo hallazgo $codigo" else "Hallazgo $codigo").setView(scroll(col))
             .setPositiveButton("Guardar") { _, _ ->
-                val t = eTubo.text.toString().trim().toIntOrNull()
+                val (t, guion) = leerTubo()
                 val e = numero(eElev.text.toString().trim())
-                val m = grupo.checkedRadioButtonId == rMemb.id
+                val m = grupo.checkedRadioButtonId == rMemb.id || (guion == true && rMemb.isEnabled)
                 val maxT = if (m) p.tubos - 1 else p.tubos
                 val nvTxt = eNivel.text.toString().trim()
                 val nv = if (nvTxt.isEmpty()) 0 else nvTxt.toIntOrNull() ?: -1
