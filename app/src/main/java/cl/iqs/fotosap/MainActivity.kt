@@ -3489,7 +3489,7 @@ class MainActivity : AppCompatActivity() {
                                luego: (String, String) -> Unit) {
         fotoPlanoNombre = "${limpiar(p.titulo)} " + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(java.util.Date()) + ".jpg"
         fotoPlanoLeer = leer; fotoPlanoPlano = p
-        menuGrande("Foto del hallazgo", listOf(
+        menuGrande("Foto del hallazgo", listOf<Pair<String, () -> Unit>>(
             "📷  Tomar foto" + (if (leer) "\nEncuadra la marca escrita, ej. \"Nivel 3 entre 50-51\"" else "") to {
                 trasFotoPlano = luego
                 val u = crearImagen(rutaFotosPlano(), fotoPlanoNombre)
