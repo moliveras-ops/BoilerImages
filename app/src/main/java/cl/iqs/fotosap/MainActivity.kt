@@ -545,6 +545,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(espacio(12))
         col.addView(boton("💾  Guardar como plantilla de caldera") { guardarComoPlantilla() })
         col.addView(boton("📝  Resumen de notas (${notasCompiladas().size})") { verResumenNotas() })
+        col.addView(boton("🗺  Planos de ubicación (${planos().size})") { menuPlanos() })
         col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
         col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
         col.addView(espacio(16))
@@ -730,7 +731,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { 0 }
         guardarEventos(eventosGuardados().filter { it != nombre })
         prefs.edit().remove("terreno_$nombre").remove("med_$nombre").remove("tipos_$nombre").remove("caldera_$nombre")
-            .remove("insp_$nombre").remove("cond_$nombre").remove("tipoEv_$nombre").apply()
+            .remove("insp_$nombre").remove("cond_$nombre").remove("tipoEv_$nombre").remove("planos_$nombre").apply()
         val quedan = resumenEventos()[nombre]?.first ?: 0
         if (quedan > 0)
             aviso("Se borraron $borradas fotos. Quedan $quedan que la app no puede borrar: elimínalas desde Mis archivos.")
@@ -1184,6 +1185,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(espacio(16))
         if (prof == 0 && elem) {
             col.addView(boton("📝  Resumen de notas (${notasCompiladas().size})") { verResumenNotas() })
+            col.addView(boton("🗺  Planos de ubicación (${planos().size})") { menuPlanos() })
             col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
             col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
         }
@@ -3437,6 +3439,282 @@ class MainActivity : AppCompatActivity() {
         return uri to nombre
     }
 
+    // ---------- Planos de ubicación de hallazgos ----------
+    // Cada evento guarda sus planos en prefs "planos_<evento>" (van en el respaldo). Un plano es una
+    // pared vista como grilla tubos × elevación: tocar marca un hallazgo. La lámina (plano, leyenda y
+    // tabla) se guarda como PNG en <evento>/Planos/ para pegarla en el informe; se sincroniza y va en el ZIP.
+
+    private fun planos(): MutableList<Plano> = Planos.desdeJson(prefs.getString("planos_$evento", null))
+    private fun guardarPlanos(l: List<Plano>) { prefs.edit().putString("planos_$evento", Planos.aJson(l)).apply() }
+    private fun rutaPlanos() = "$raiz/$evento/Planos/"
+    private fun nombreImagenPlano(p: Plano) = "Plano ${limpiar(p.titulo)}.png"
+
+    private fun menuPlanos() {
+        val l = planos()
+        menuGrande("Planos de ubicación", l.mapIndexed { i, p ->
+            "🗺  ${p.titulo}\n${p.hallazgos.size} hallazgo(s) · ${p.tubos} tubos · ${Planos.num(p.elevMin)} a ${Planos.num(p.elevMax)} m" to { editorPlano(i) }
+        } + listOf("＋  Nuevo plano" to { nuevoPlano() }))
+    }
+
+    private fun nuevoPlano() {
+        val ultimo = Planos.desdeJson("[${prefs.getString("plano_ultimo", "") ?: ""}]").firstOrNull()
+        fun crear(nombre: String) {
+            val p = Plano(limpiar(nombre), "$evento · Vista desde el exterior", ultimo?.tubos ?: 100,
+                ultimo?.elevMin ?: 0.0, ultimo?.elevMax ?: 30.0, ultimo?.paso ?: 2.5)
+            configPlano(p, "Nuevo plano") {
+                val l = planos(); l.add(p); guardarPlanos(l)
+                editorPlano(l.size - 1)
+            }
+        }
+        val paredes = tipos.flatMap { t -> t.paredes.map { it.nombre } }.distinct()
+        menuGrande("¿Qué pared?", paredes.map { n -> "🔥  $n" to { crear(n) } } +
+            listOf("⌨️  Otro nombre" to { dialogoTexto("Nombre del plano", "") { crear(it) } }))
+    }
+
+    /** Diálogo con los datos de la pared: nombre, subtítulo, tubos y elevaciones. */
+    private fun configPlano(p: Plano, titulo: String, ok: () -> Unit) {
+        val col = columna()
+        fun campo(et: String, valor: String, tipo: Int): EditText {
+            col.addView(texto(et, 13f))
+            return EditText(this).apply { inputType = tipo; setText(valor); col.addView(this) }
+        }
+        val dec = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED
+        val txt = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        val eTit = campo("Nombre (título del plano)", p.titulo, txt)
+        val eSub = campo("Subtítulo", p.subtitulo, txt)
+        val eN = campo("N° de tubos", "${p.tubos}", InputType.TYPE_CLASS_NUMBER)
+        val e0 = campo("Elevación inferior (m)", Planos.num(p.elevMin), dec)
+        val e1 = campo("Elevación superior (m)", Planos.num(p.elevMax), dec)
+        val ePa = campo("Líneas de elevación cada (m)", Planos.num(p.paso), dec)
+        mostrar(AlertDialog.Builder(this).setTitle(titulo).setView(scroll(col))
+            .setPositiveButton("Guardar") { _, _ ->
+                val n = eN.text.toString().trim().toIntOrNull()
+                val a = numero(e0.text.toString().trim()); val b = numero(e1.text.toString().trim())
+                val pa = numero(ePa.text.toString().trim())
+                when {
+                    eTit.text.isBlank() -> aviso("Falta el nombre")
+                    n == null || n !in 2..1000 -> aviso("N° de tubos entre 2 y 1000")
+                    a == null || b == null || b <= a -> aviso("La elevación superior debe ser mayor que la inferior")
+                    pa == null || pa <= 0 -> aviso("El paso de las líneas debe ser mayor que 0")
+                    else -> {
+                        p.titulo = limpiar(eTit.text.toString()); p.subtitulo = eSub.text.toString().trim()
+                        p.tubos = n; p.elevMin = a; p.elevMax = b; p.paso = pa
+                        p.hallazgos.forEach { it.tubo = it.tubo.coerceIn(1, n); it.elev = it.elev.coerceIn(a, b) }
+                        prefs.edit().putString("plano_ultimo", Planos.aJson(listOf(Plano("", "", n, a, b, pa))).trim('[', ']')).apply()
+                        ok()
+                    }
+                }
+            }
+            .setNegativeButton("Cancelar", null).create())
+    }
+
+    /** Marcador del tipo de hallazgo como ícono pequeño. */
+    private fun iconoHallazgo(t: Planos.TipoH, tam: Int = 22): android.graphics.drawable.Drawable {
+        val px = dp(tam)
+        val b = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+        Planos.marcador(Canvas(b), t.forma, px / 2f, px / 2f, px * 0.32f, t.color)
+        return android.graphics.drawable.BitmapDrawable(resources, b).apply { setBounds(0, 0, px, px) }
+    }
+
+    /** Pantalla completa para marcar hallazgos en un plano. Los cambios se guardan al momento. */
+    private fun editorPlano(i: Int) {
+        val lista = planos()
+        val p = lista.getOrNull(i) ?: return
+        var tipoAct = prefs.getString("plano_tipo", "adel") ?: "adel"
+        val dlg = dialogoPantallaCompleta()
+        val raizV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.fondo) }
+        val tituloTv = TextView(this)
+        fun cerrar() {
+            dlg.dismiss()
+            if (p.hallazgos.isNotEmpty()) Thread { runCatching { guardarImagenPlano(p) } }.start()
+            render()
+        }
+        raizV.addView(barraOscura(tituloTv) { cerrar() })
+        dlg.setOnCancelListener { if (p.hallazgos.isNotEmpty()) Thread { runCatching { guardarImagenPlano(p) } }.start(); render() }
+
+        val vista = VistaPlano(p)
+        fun refrescarTitulo() { tituloTv.text = "${p.titulo}\nToca para marcar · ${p.hallazgos.size} hallazgo(s)" }
+        fun cambio() { guardarPlanos(lista); vista.actualizar(); refrescarTitulo() }
+        refrescarTitulo()
+        raizV.addView(ScrollView(this).apply {
+            setBackgroundColor(Color.WHITE)
+            addView(vista)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // Tipo con que se marca el próximo hallazgo
+        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(6), dp(6), dp(6), dp(6)) }
+        val vistasChip = mutableMapOf<String, TextView>()
+        fun pintarChips() = vistasChip.forEach { (k, tv) ->
+            val activo = k == tipoAct
+            tv.background = fondoRedondeado(if (activo) C.acento else Color.parseColor("#1C2A3A"), 20)
+            tv.setTextColor(if (activo) C.tinta else Color.WHITE)
+            tv.typeface = if (activo) medio else Typeface.DEFAULT
+        }
+        Planos.tipos.forEach { t ->
+            val tv = TextView(this).apply {
+                text = t.nombre; textSize = 15f; gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(10), dp(14), dp(10))
+                setCompoundDrawablesRelative(iconoHallazgo(t), null, null, null); compoundDrawablePadding = dp(8)
+                setOnClickListener { tipoAct = t.clave; prefs.edit().putString("plano_tipo", t.clave).apply(); pintarChips() }
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    .apply { setMargins(dp(3), 0, dp(3), 0) }
+            }
+            vistasChip[t.clave] = tv; chips.addView(tv)
+        }
+        pintarChips()
+        raizV.addView(HorizontalScrollView(this).apply {
+            setBackgroundColor(C.oscuro); isHorizontalScrollBarEnabled = false; addView(chips)
+        })
+
+        vista.alTocar = { x, y ->
+            val h = Planos.hallazgoEn(p, x, y)
+            if (h >= 0) {
+                vista.sel = h; vista.invalidate()
+                dialogoHallazgo(p, p.hallazgos[h], Planos.codigo(h), tipoAct, 0, 0.0,
+                    alBorrar = { p.hallazgos.removeAt(h); vista.sel = -1; cambio() },
+                    alCerrar = { vista.sel = -1; vista.invalidate() }) { cambio() }
+            } else Planos.ubicar(p, x, y)?.let { (tubo, e) ->
+                dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), tipoAct, tubo, e) { nuevo ->
+                    p.hallazgos.add(nuevo); cambio()
+                }
+            }
+        }
+
+        val acciones = filaOscura()
+        acciones.addView(accionOscura(R.drawable.ic_editar, "Pared") {
+            configPlano(p, "Datos de la pared") { cambio() }
+        })
+        acciones.addView(accionOscura(R.drawable.ic_compartir, "Compartir") {
+            conImagenPlano(p) { uri ->
+                val envio = Intent(Intent.ACTION_SEND).setType("image/png")
+                    .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                runCatching { startActivity(Intent.createChooser(envio, "Compartir plano")) }
+                    .onFailure { aviso("No hay app para compartir") }
+            }
+        })
+        acciones.addView(accionOscura(R.drawable.ic_borrar, "Eliminar", Color.parseColor("#FF8A80")) {
+            confirmar("¿Eliminar el plano ${p.titulo}? La imagen ya guardada no se borra.") {
+                lista.remove(p); guardarPlanos(lista); dlg.dismiss(); render()
+            }
+        })
+        acciones.addView(accionOscura(R.drawable.ic_guardar, "Imagen", C.tinta, C.acento) {
+            conImagenPlano(p) { aviso("Imagen guardada en ${rutaPlanos()}${nombreImagenPlano(p)}") }
+        })
+        raizV.addView(acciones.apply { setPadding(dp(4), 0, dp(4), dp(8)) })
+
+        dlg.setContentView(raizV)
+        dlg.show()
+    }
+
+    /** Diálogo para crear ([h] null) o editar un hallazgo. */
+    private fun dialogoHallazgo(p: Plano, h: Hallazgo?, codigo: String, tipoIni: String, tubo: Int, elev: Double,
+                                alBorrar: (() -> Unit)? = null, alCerrar: () -> Unit = {}, ok: (Hallazgo) -> Unit) {
+        val col = columna()
+        val nombres = Planos.tipos.map { it.nombre }
+        val sp = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, nombres)
+            setSelection(Planos.tipos.indexOfFirst { it.clave == (h?.tipo ?: tipoIni) }.coerceAtLeast(0))
+        }
+        col.addView(texto("Tipo", 13f)); col.addView(sp)
+        val fila = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun mitad(et: String, valor: String, tipo: Int): EditText {
+            val c = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            c.addView(texto(et, 13f))
+            val e = EditText(this).apply { inputType = tipo; setText(valor) }
+            c.addView(e)
+            fila.addView(c, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
+            return e
+        }
+        val eTubo = mitad("Tubo (1 a ${p.tubos})", "${h?.tubo ?: tubo}", InputType.TYPE_CLASS_NUMBER)
+        val eElev = mitad("Elevación (m)", Planos.num(h?.elev ?: elev),
+            InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED)
+        col.addView(fila)
+        col.addView(texto("Descripción", 13f))
+        val eDesc = EditText(this).apply {
+            hint = "Ej.: espesor 3,1 mm (nom. 4,0)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setText(h?.desc ?: "")
+        }
+        col.addView(eDesc)
+        col.addView(boton("🎤  Dictar descripción") { dictar(eDesc) })
+        val b = AlertDialog.Builder(this).setTitle(if (h == null) "Nuevo hallazgo $codigo" else "Hallazgo $codigo").setView(scroll(col))
+            .setPositiveButton("Guardar") { _, _ ->
+                val t = eTubo.text.toString().trim().toIntOrNull()
+                val e = numero(eElev.text.toString().trim())
+                when {
+                    t == null || t !in 1..p.tubos -> aviso("El tubo debe estar entre 1 y ${p.tubos}")
+                    e == null || e < p.elevMin || e > p.elevMax ->
+                        aviso("La elevación debe estar entre ${Planos.num(p.elevMin)} y ${Planos.num(p.elevMax)} m")
+                    else -> {
+                        val x = h ?: Hallazgo("", 0, 0.0, "")
+                        x.tipo = Planos.tipos[sp.selectedItemPosition].clave; x.tubo = t; x.elev = e
+                        x.desc = eDesc.text.toString().trim()
+                        ok(x)
+                    }
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .setOnDismissListener { alCerrar() }
+        if (alBorrar != null) b.setNeutralButton("Eliminar") { _, _ -> alBorrar() }
+        mostrar(b.create())
+    }
+
+    /** Guarda (o reemplaza) la lámina del plano como PNG en <evento>/Planos/. */
+    private fun guardarImagenPlano(p: Plano): Uri? {
+        val ruta = rutaPlanos(); val nombre = nombreImagenPlano(p)
+        val bmp = Planos.imagen(p)
+        try {
+            val uri = buscarArchivo(ruta, nombre) ?: contentResolver.insert(coleccion, ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
+                put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, ruta)
+            }) ?: return null
+            val ok = contentResolver.openOutputStream(uri, "wt")?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) } ?: false
+            return if (ok) uri else null
+        } finally { bmp.recycle() }
+    }
+
+    private fun conImagenPlano(p: Plano, luego: (Uri) -> Unit) {
+        val espera = AlertDialog.Builder(this).setMessage("Generando imagen del plano…").setCancelable(false).show()
+        Thread {
+            val uri = runCatching { guardarImagenPlano(p) }.getOrNull()
+            runOnUiThread {
+                espera.dismiss()
+                if (uri == null) aviso("No se pudo guardar la imagen del plano") else luego(uri)
+            }
+        }.start()
+    }
+
+    /** Vista del plano: dibuja la lámina al ancho de la pantalla; un toque llama a [alTocar] en unidades de lámina. */
+    private inner class VistaPlano(val p: Plano) : View(this@MainActivity) {
+        var alTocar: (Float, Float) -> Unit = { _, _ -> }
+        var sel = -1
+        private val escala get() = width / Planos.W
+        private val gestos = android.view.GestureDetector(context, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+            override fun onSingleTapUp(e: MotionEvent): Boolean {
+                if (width > 0) { performClick(); alTocar(e.x / escala, e.y / escala) }
+                return true
+            }
+        })
+
+        fun actualizar() { requestLayout(); invalidate() }
+
+        override fun onMeasure(wSpec: Int, hSpec: Int) {
+            val w = MeasureSpec.getSize(wSpec)
+            setMeasuredDimension(w, (w * Planos.alto(p) / Planos.W).toInt())
+        }
+
+        override fun onDraw(c: Canvas) {
+            c.save(); c.scale(escala, escala)
+            Planos.dibujar(c, p, sel)
+            c.restore()
+        }
+
+        override fun onTouchEvent(e: MotionEvent) = gestos.onTouchEvent(e)
+        override fun performClick(): Boolean = super.performClick()
+    }
+
     // ---------- Medición: foto con puntos de espesor ----------
     // Un solo flujo: foto de la zona → tocar cada punto medido → valor por foto del medidor
     // (lectura automática) o escrito / dictado → la foto muestra el espesor en cada punto →
@@ -4482,7 +4760,7 @@ class MainActivity : AppCompatActivity() {
         "⌨️" to R.drawable.ic_teclado, "⌨" to R.drawable.ic_teclado, "←" to R.drawable.ic_volver,
         "＋" to R.drawable.ic_agregar, "✕" to R.drawable.ic_cerrar, "✓" to R.drawable.ic_listo,
         "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento, "📐" to R.drawable.ic_regla, "📦" to R.drawable.ic_zip,
-        "🌳" to R.drawable.ic_arbol, "🚦" to R.drawable.ic_estado, "☁" to R.drawable.ic_nube)
+        "🌳" to R.drawable.ic_arbol, "🗺" to R.drawable.ic_plano, "🚦" to R.drawable.ic_estado, "☁" to R.drawable.ic_nube)
 
     /** Separa un emoji inicial del texto: (ícono, texto limpio). */
     private fun separarIcono(s: String): Pair<Int?, String> {
