@@ -185,6 +185,13 @@ object Planos {
         return mejor
     }
 
+    /** Índice del hallazgo cuya fila de la tabla se tocó, o -1. */
+    fun filaEn(p: Plano, x: Float, y: Float): Int {
+        if (x < X0 || x > X1) return -1
+        val i = Math.floor(((y - topTabla(p)) / FILA).toDouble()).toInt() - 1
+        return if (i in p.hallazgos.indices) i else -1
+    }
+
     private fun pinta(size: Float, color: Int, negrita: Boolean = false, alin: Paint.Align = Paint.Align.LEFT) =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textSize = size; this.color = color; textAlign = alin
@@ -323,6 +330,7 @@ object Planos {
         p.hallazgos.forEachIndexed { i, h ->
             val y = top + FILA * (i + 1)
             if (i % 2 == 1) c.drawRect(X0, y, X1, y + FILA, franja)
+            if (i == sel) c.drawRect(X0, y, X1, y + FILA, Paint().apply { color = Color.parseColor("#FFE3A3") })
             val maxDesc = X1 - cols[4] - 16f
             var d = h.desc.replace('\n', ' ')
             if (celda.measureText(d) > maxDesc) {

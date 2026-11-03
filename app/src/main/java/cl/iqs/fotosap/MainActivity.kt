@@ -3611,7 +3611,7 @@ class MainActivity : AppCompatActivity() {
         dlg.setOnCancelListener { if (p.hallazgos.isNotEmpty()) Thread { runCatching { guardarImagenPlano(p) } }.start(); render() }
 
         val vista = VistaPlano(p)
-        fun refrescarTitulo() { tituloTv.text = "${p.titulo}\nToca para marcar · ${p.hallazgos.size} hallazgo(s)" }
+        fun refrescarTitulo() { tituloTv.text = "${p.titulo}\nMarcar o editar · ${p.hallazgos.size} hallazgo(s)" }
         fun cambio() { guardarPlanos(lista); vista.actualizar(); refrescarTitulo() }
         refrescarTitulo()
         raizV.addView(ScrollView(this).apply {
@@ -3644,16 +3644,22 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(C.oscuro); isHorizontalScrollBarEnabled = false; addView(chips)
         })
 
+        /** Edita el hallazgo [h]: tipo, ubicación, nivel, elevación, descripción y foto; o lo elimina. */
+        fun editarHallazgo(h: Int) {
+            val hh = p.hallazgos.getOrNull(h) ?: return
+            vista.sel = h; vista.invalidate()
+            dialogoHallazgo(p, hh, Planos.codigo(h), tipoAct, null,
+                alBorrar = { confirmar("¿Eliminar el hallazgo ${Planos.codigo(h)}? Los siguientes se renumeran.") {
+                    p.hallazgos.removeAt(h); vista.sel = -1; cambio() } },
+                alCerrar = { vista.sel = -1; vista.invalidate() },
+                alFoto = { pedirFotoPlano(p, false) { nombre, _ -> hh.foto = nombre; cambio() } }) { cambio() }
+        }
+
         vista.alTocar = { x, y ->
-            val h = Planos.hallazgoEn(p, x, y)
-            if (h >= 0) {
-                vista.sel = h; vista.invalidate()
-                val hh = p.hallazgos[h]
-                dialogoHallazgo(p, hh, Planos.codigo(h), tipoAct, null,
-                    alBorrar = { p.hallazgos.removeAt(h); vista.sel = -1; cambio() },
-                    alCerrar = { vista.sel = -1; vista.invalidate() },
-                    alFoto = { pedirFotoPlano(p, false) { nombre, _ -> hh.foto = nombre; cambio() } }) { cambio() }
-            } else Planos.ubicar(p, x, y)?.let { prop ->
+            // Tocar un marcador o su fila en la tabla → editar; tocar la grilla vacía → nuevo hallazgo
+            val h = Planos.hallazgoEn(p, x, y).takeIf { it >= 0 } ?: Planos.filaEn(p, x, y)
+            if (h >= 0) editarHallazgo(h)
+            else Planos.ubicar(p, x, y)?.let { prop ->
                 dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), tipoAct, prop) { nuevo ->
                     p.hallazgos.add(nuevo); cambio()
                 }
@@ -3677,8 +3683,16 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
-        acciones.addView(accionOscura(R.drawable.ic_editar, "Pared") {
-            configPlano(p, "Datos de la pared") { cambio() }
+        acciones.addView(accionOscura(R.drawable.ic_editar, "Editar") {
+            // Lista de hallazgos para editar (también los que quedan tapados o en el borde del plano) y datos de la pared
+            val ops = mutableListOf<Pair<String, () -> Unit>>()
+            p.hallazgos.forEachIndexed { i, h ->
+                val desc = h.desc.replace('\n', ' ').let { if (it.length > 40) it.take(40) + "…" else it }
+                ops.add("✏  ${Planos.codigo(i)} · ${Planos.tipo(h.tipo).nombre}\n${h.ubicacion()} · ${Planos.num(h.elev)} m" +
+                        (if (h.nivel > 0) " · N${h.nivel}" else "") + (if (desc.isNotBlank()) " · $desc" else "") to { editarHallazgo(i) })
+            }
+            ops.add("📐  Datos de la pared\nNombre, tubos, elevaciones y niveles" to { configPlano(p, "Datos de la pared") { cambio() } })
+            menuGrande(if (p.hallazgos.isEmpty()) "Editar" else "Editar hallazgo", ops)
         })
         acciones.addView(accionOscura(R.drawable.ic_compartir, "Compartir") {
             conImagenPlano(p) { uri ->
