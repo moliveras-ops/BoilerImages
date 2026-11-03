@@ -3578,9 +3578,10 @@ class MainActivity : AppCompatActivity() {
         val e0 = campo("Elevación inferior (m)", Planos.num(p.elevMin), dec)
         val e1 = campo("Elevación superior (m)", Planos.num(p.elevMax), dec)
         val ePa = campo("Líneas de elevación cada (m)", Planos.num(p.paso), dec)
-        val eNv = campo("Niveles: uno por línea, n° = cota (m)", Planos.nivelesTexto(p),
-            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE).apply { hint = "1 = 4,5\n2 = 8,0\n3 = 12,5"; minLines = 2 }
-        col.addView(texto("Con los niveles, \"Nivel 3\" escrito en la pared (o en el hallazgo) queda en su cota.", 12f))
+        val eNv = campo("Niveles: uno por línea, nombre = cota (m)", Planos.nivelesTexto(p),
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS)
+            .apply { hint = "EAP = 5,2\nEAS = 8,4\nEAT = 14,0\n3 = 12,5"; minLines = 2 }
+        col.addView(texto("El nombre puede ser un número (3) o letras (EAP, EAS, EAT). Escrito en la pared o en el hallazgo, queda en su cota.", 12f))
         mostrar(AlertDialog.Builder(this).setTitle(titulo).setView(scroll(col))
             .setPositiveButton("Guardar") { _, _ ->
                 val n = eN.text.toString().trim().toIntOrNull()
@@ -3592,7 +3593,7 @@ class MainActivity : AppCompatActivity() {
                     n == null || n !in 2..1000 -> aviso("N° de tubos entre 2 y 1000")
                     a == null || b == null || b <= a -> aviso("La elevación superior debe ser mayor que la inferior")
                     pa == null || pa <= 0 -> aviso("El paso de las líneas debe ser mayor que 0")
-                    nv == null -> aviso("Niveles: escribe una línea por nivel, ej. 3 = 12,5")
+                    nv == null -> aviso("Niveles: escribe una línea por nivel, ej. EAP = 5,2")
                     nv.values.any { it < a || it > b } -> aviso("Las cotas de los niveles deben estar entre ${Planos.num(a)} y ${Planos.num(b)} m")
                     else -> {
                         p.niveles = nv
@@ -3669,7 +3670,7 @@ class MainActivity : AppCompatActivity() {
         fun editarHallazgo(h: Int) {
             val hh = p.hallazgos.getOrNull(h) ?: return
             vista.sel = h; vista.invalidate()
-            dialogoHallazgo(p, hh, Planos.codigo(h), tipoAct, null,
+            dialogoHallazgo(p, hh, Planos.codigo(h), tipoAct, null, alNiveles = { cambio() },
                 alBorrar = { confirmar("¿Eliminar el hallazgo ${Planos.codigo(h)}? Los siguientes se renumeran.") {
                     p.hallazgos.removeAt(h); vista.sel = -1; cambio() } },
                 alCerrar = { vista.sel = -1; vista.invalidate() },
@@ -3681,7 +3682,7 @@ class MainActivity : AppCompatActivity() {
             val h = Planos.hallazgoEn(p, x, y).takeIf { it >= 0 } ?: Planos.filaEn(p, x, y)
             if (h >= 0) editarHallazgo(h)
             else Planos.ubicar(p, x, y)?.let { prop ->
-                dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), tipoAct, prop) { nuevo ->
+                dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), tipoAct, prop, alNiveles = { cambio() }) { nuevo ->
                     p.hallazgos.add(nuevo); cambio()
                 }
             }
@@ -3690,9 +3691,9 @@ class MainActivity : AppCompatActivity() {
         val acciones = filaOscura()
         /** Hallazgo nuevo con la ubicación leída en la foto; tipo leído o, si no hay, el elegido en los chips. */
         fun desdeLectura(l: Lectura, nombre: String, texto: String) =
-            Hallazgo(l.tipo ?: tipoAct, l.tubo!!, l.elev!!, "", l.memb, l.nivel ?: 0, nombre).also { Planos.ajustar(p, it) }
+            Hallazgo(l.tipo ?: tipoAct, l.tubo!!, l.elev!!, "", l.memb, l.nivel ?: "", nombre).also { Planos.ajustar(p, it) }
         fun resumenH(h: Hallazgo) = "${Planos.tipo(h.tipo).nombre} · ${h.ubicacion()} · ${Planos.num(h.elev)} m" +
-                (if (h.nivel > 0) " (N${h.nivel})" else "")
+                (if (h.nivel.isNotEmpty()) " (${Planos.etiquetaNivel(h.nivel)})" else "")
         /** Otro hallazgo ya marcado en la misma ubicación (posible foto repetida). */
         fun repetido(h: Hallazgo) = p.hallazgos.indexOfFirst {
             it !== h && it.tubo == h.tubo && it.memb == h.memb && Math.abs(it.elev - h.elev) < 0.05 }
@@ -3700,14 +3701,14 @@ class MainActivity : AppCompatActivity() {
         /** Formulario para completar a mano lo que no se pudo leer. */
         fun completar(nombre: String, texto: String, sigue: () -> Unit = {}) {
             val l = Planos.interpretar(p, texto)
-            val prop = Hallazgo(l?.tipo ?: "", l?.tubo ?: 1, l?.elev ?: p.elevMin, "", l?.memb ?: false, l?.nivel ?: 0, nombre)
+            val prop = Hallazgo(l?.tipo ?: "", l?.tubo ?: 1, l?.elev ?: p.elevMin, "", l?.memb ?: false, l?.nivel ?: "", nombre)
             when {
                 l == null -> aviso(if (texto.isBlank()) "No se encontró texto en la foto: completa la ubicación"
                                    else "No se entendió la ubicación: complétala")
                 l.tubo == null -> aviso("No se encontró el tubo: complétalo")
-                l.nivel != null && l.elev == null -> aviso("El nivel ${l.nivel} no tiene cota en el plano: ingresa la elevación o defínela en \"Pared\"")
+                l.nivel != null && l.elev == null -> aviso("El nivel ${Planos.etiquetaNivel(l.nivel)} no tiene cota: ingrésala con \"Editar niveles y cotas\"")
             }
-            dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), l?.tipo ?: tipoAct, prop, leido = texto,
+            dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), l?.tipo ?: tipoAct, prop, leido = texto, alNiveles = { cambio() },
                 alCerrar = { vista.post { sigue() } }) { nuevo -> p.hallazgos.add(nuevo); cambio() }
         }
 
@@ -3802,8 +3803,9 @@ class MainActivity : AppCompatActivity() {
             p.hallazgos.forEachIndexed { i, h ->
                 val desc = h.desc.replace('\n', ' ').let { if (it.length > 40) it.take(40) + "…" else it }
                 ops.add("✏  ${Planos.codigo(i)} · ${Planos.tipo(h.tipo).nombre}\n${h.ubicacion()} · ${Planos.num(h.elev)} m" +
-                        (if (h.nivel > 0) " · N${h.nivel}" else "") + (if (desc.isNotBlank()) " · $desc" else "") to { editarHallazgo(i) })
+                        (if (h.nivel.isNotEmpty()) " · ${Planos.etiquetaNivel(h.nivel)}" else "") + (if (desc.isNotBlank()) " · $desc" else "") to { editarHallazgo(i) })
             }
+            ops.add("📏  Niveles y cotas\nEAP, EAS, EAT… (${p.niveles.size} definido(s))" to { editarNiveles(p) { cambio() } })
             ops.add("📐  Datos de la pared\nNombre, tubos, elevaciones y niveles" to { configPlano(p, "Datos de la pared") { cambio() } })
             menuGrande(if (p.hallazgos.isEmpty()) "Editar" else "Editar hallazgo", ops)
         })
@@ -3834,10 +3836,32 @@ class MainActivity : AppCompatActivity() {
         dlg.show()
     }
 
+    /** Edita solo los niveles de la pared (nombre = cota). Los hallazgos con nivel pasan a la nueva cota. */
+    private fun editarNiveles(p: Plano, ok: () -> Unit) {
+        val col = columna()
+        col.addView(texto("Uno por línea: nombre = cota (m). Ej. EAP = 5,2 · EAS = 8,4 · EAT = 14,0 · 3 = 12,5", 13f))
+        val e = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            setText(Planos.nivelesTexto(p)); hint = "EAP = 5,2\nEAS = 8,4\nEAT = 14,0"; minLines = 3
+        }
+        col.addView(e)
+        mostrar(AlertDialog.Builder(this).setTitle("Niveles y cotas · ${p.titulo}").setView(scroll(col))
+            .setPositiveButton("Guardar") { _, _ ->
+                val nv = Planos.leerNiveles(e.text.toString())
+                when {
+                    nv == null -> aviso("Escribe una línea por nivel, ej. EAP = 5,2")
+                    nv.values.any { it < p.elevMin || it > p.elevMax } ->
+                        aviso("Las cotas deben estar entre ${Planos.num(p.elevMin)} y ${Planos.num(p.elevMax)} m (cámbialo en Datos de la pared)")
+                    else -> { p.niveles = nv; p.hallazgos.forEach { Planos.ajustar(p, it) }; ok() }
+                }
+            }
+            .setNegativeButton("Cancelar", null).create())
+    }
+
     /** Diálogo para crear ([h] null, con la ubicación propuesta [prop]) o editar un hallazgo. */
     private fun dialogoHallazgo(p: Plano, h: Hallazgo?, codigo: String, tipoIni: String, prop: Hallazgo?,
                                 alBorrar: (() -> Unit)? = null, alCerrar: () -> Unit = {}, leido: String = "",
-                                alFoto: (() -> Unit)? = null, ok: (Hallazgo) -> Unit) {
+                                alFoto: (() -> Unit)? = null, alNiveles: () -> Unit = {}, ok: (Hallazgo) -> Unit) {
         val col = columna()
         var dlgH: AlertDialog? = null
         val fotoH = (h ?: prop)?.foto ?: ""
@@ -3884,7 +3908,7 @@ class MainActivity : AppCompatActivity() {
         }
         val eTubo = mitad("Tubo (1 a ${p.tubos})", "${base.tubo}", InputType.TYPE_CLASS_PHONE)
         val etTubo = (eTubo.parent as LinearLayout).getChildAt(0) as TextView
-        val eNivel = mitad("Nivel", if (base.nivel > 0) "${base.nivel}" else "", InputType.TYPE_CLASS_NUMBER)
+        val eNivel = mitad("Nivel", base.nivel, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS).apply { hint = "ej. EAP" }
         val eElev = mitad("Elevación (m)", Planos.num(base.elev),
             InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED)
         col.addView(fila)
@@ -3928,11 +3952,34 @@ class MainActivity : AppCompatActivity() {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun afterTextChanged(s: android.text.Editable?) {
-                s?.toString()?.trim()?.toIntOrNull()?.let { p.niveles[it] }?.let { eElev.setText(Planos.num(it)) }
+                s?.toString()?.let { Planos.cota(p, it) }?.let { v -> Planos.num(v, 2).let { if (eElev.text.toString() != it) eElev.setText(it) } }
             }
         })
-        if (p.niveles.isEmpty()) col.addView(texto("Para usar niveles, define sus cotas en \"Pared\".", 12f))
-        else col.addView(texto("Niveles: " + p.niveles.entries.joinToString(" · ") { "N${it.key} = ${Planos.num(it.value)} m" }, 12f))
+        // Botones con los niveles de la pared: tocar uno completa nivel y cota
+        val filaNv = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val infoNv = texto("", 12f)
+        fun pintarNiveles() {
+            filaNv.removeAllViews()
+            p.niveles.forEach { (k, v) ->
+                filaNv.addView(TextView(this).apply {
+                    text = "${Planos.etiquetaNivel(k)}\n${Planos.num(v, 2)} m"; textSize = 14f; gravity = Gravity.CENTER
+                    setTextColor(C.tinta); typeface = medio; minWidth = dp(64); minHeight = dp(52)
+                    setPadding(dp(10), dp(4), dp(10), dp(4))
+                    background = fondoRedondeado(Color.parseColor("#D6EEF0"), 12)
+                    setOnClickListener { eNivel.setText(k); eElev.setText(Planos.num(v, 2)) }
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) })
+            }
+            infoNv.text = if (p.niveles.isEmpty()) "Sin niveles definidos: agrégalos con el botón (ej. EAP = 5,2)." else "Toca un nivel para usar su cota."
+        }
+        pintarNiveles()
+        col.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(filaNv) })
+        col.addView(infoNv)
+        col.addView(boton("📐  Editar niveles y cotas") {
+            editarNiveles(p) {
+                alNiveles(); pintarNiveles()
+                Planos.cota(p, eNivel.text.toString())?.let { eElev.setText(Planos.num(it, 2)) }
+            }
+        })
         col.addView(texto("Descripción", 13f))
         val eDesc = EditText(this).apply {
             hint = "Ej.: espesor 3,1 mm (nom. 4,0)"
@@ -3948,11 +3995,10 @@ class MainActivity : AppCompatActivity() {
                 val m = grupo.checkedRadioButtonId == rMemb.id || (guion == true && rMemb.isEnabled)
                 val maxT = if (m) p.tubos - 1 else p.tubos
                 val nvTxt = eNivel.text.toString().trim()
-                val nv = if (nvTxt.isEmpty()) 0 else nvTxt.toIntOrNull() ?: -1
+                val nv = Planos.nombreNivel(nvTxt)
                 when {
                     t == null || t !in 1..maxT -> aviso(if (m) "En membrana, el tubo izquierdo debe estar entre 1 y $maxT"
                                                         else "El tubo debe estar entre 1 y ${p.tubos}")
-                    nv < 0 -> aviso("El nivel debe ser un número")
                     e == null || e < p.elevMin || e > p.elevMax ->
                         aviso("La elevación debe estar entre ${Planos.num(p.elevMin)} y ${Planos.num(p.elevMax)} m")
                     else -> {
@@ -4084,7 +4130,7 @@ class MainActivity : AppCompatActivity() {
                 dato("Ubicación", if (h.memb) "Membrana entre tubos ${h.tubo} y ${h.tubo + 1}" else "Tubo ${h.tubo}")
                 dato("Código de ubicación", h.ubicacion())
                 dato("Elevación", "${Planos.num(h.elev, 2)} m")
-                if (h.nivel > 0) dato("Nivel", "N${h.nivel}")
+                if (h.nivel.isNotEmpty()) dato("Nivel", Planos.etiquetaNivel(h.nivel))
                 c.drawText("Descripción", x0 + 4f, y, pinta(8.5f, gris)); y += 5f
                 val desc = h.desc.ifBlank { "—" }
                 val lay = android.text.StaticLayout.Builder.obtain(desc, 0, desc.length, pinta(10.5f, Color.BLACK), (colW - 8f).toInt()).build()
@@ -4133,14 +4179,14 @@ class MainActivity : AppCompatActivity() {
         d.titulo("Resumen", 13)
         d.tabla(listOf(listOf("ID", "Tipo", "Ubicación", "Elev. (m)", "Nivel", "Foto", "Descripción")) +
             p.hallazgos.mapIndexed { i, h -> listOf(Planos.codigo(i), Planos.tipo(h.tipo).nombre, h.ubicacion(),
-                Planos.num(h.elev, 2), if (h.nivel > 0) "N${h.nivel}" else "", if (h.foto.isNotBlank()) "Sí" else "—", h.desc) },
+                Planos.num(h.elev, 2), Planos.etiquetaNivel(h.nivel), if (h.foto.isNotBlank()) "Sí" else "—", h.desc) },
             listOf(1.4, 2.8, 2.1, 1.7, 1.3, 1.2, 6.5))
         d.texto("T = tubo · M 12–13 = membrana entre los tubos 12 y 13 · N = nivel · Foto: Sí = con foto", 8, color = "5D6B78")
         p.hallazgos.forEachIndexed { i, h ->
             d.titulo("${Planos.codigo(i)} · ${Planos.tipo(h.tipo).nombre}", 13, saltoPagina = i % 2 == 0)
             d.tabla(listOf(
                 listOf("Ubicación", if (h.memb) "Membrana entre tubos ${h.tubo} y ${h.tubo + 1} (${h.ubicacion()})" else "Tubo ${h.tubo} (${h.ubicacion()})"),
-                listOf("Elevación", "${Planos.num(h.elev, 2)} m" + if (h.nivel > 0) " · Nivel ${h.nivel}" else ""),
+                listOf("Elevación", "${Planos.num(h.elev, 2)} m" + if (h.nivel.isNotEmpty()) " · Nivel ${Planos.etiquetaNivel(h.nivel)}" else ""),
                 listOf("Descripción", h.desc.ifBlank { "—" })), listOf(3.5, 13.5), encabezado = false, primeraColNegrita = true)
             val bmp = h.foto.takeIf { it.isNotBlank() }?.let { buscarArchivo(rutaFotosPlano(), it) }
                 ?.let { runCatching { cargarBitmap(it, 1600) }.getOrNull() }

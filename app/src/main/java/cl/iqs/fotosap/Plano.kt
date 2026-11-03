@@ -17,7 +17,8 @@ import java.util.Locale
  * Si [memb] es true el hallazgo está en la membrana entre el tubo [tubo] y el [tubo] + 1.
  */
 class Hallazgo(var tipo: String, var tubo: Int, var elev: Double, var desc: String, var memb: Boolean = false,
-               var nivel: Int = 0, var foto: String = "") {
+               /** Nivel: número ("3") o nombre ("EAP", "EAS", "EAT"); "" = sin nivel. */
+               var nivel: String = "", var foto: String = "") {
     /** Ubicación para tablas: "T 12" o "M 12–13". */
     fun ubicacion() = if (memb) "M $tubo–${tubo + 1}" else "T $tubo"
 }
@@ -26,11 +27,11 @@ class Hallazgo(var tipo: String, var tubo: Int, var elev: Double, var desc: Stri
 class Plano(var titulo: String, var subtitulo: String, var tubos: Int,
             var elevMin: Double, var elevMax: Double, var paso: Double,
             val hallazgos: MutableList<Hallazgo> = mutableListOf(),
-            /** Cota en metros de cada nivel (ej. 3 → 12,5). */
-            var niveles: MutableMap<Int, Double> = sortedMapOf())
+            /** Cota en metros de cada nivel, por nombre (ej. "3" → 12,5; "EAP" → 5,2), ordenados por cota. */
+            var niveles: MutableMap<String, Double> = linkedMapOf())
 
 /** Ubicación leída del texto de una foto (ej. "Nivel 3 entre 50-51"). */
-class Lectura(val tubo: Int?, val memb: Boolean, val nivel: Int?, val elev: Double?, val tipo: String? = null) {
+class Lectura(val tubo: Int?, val memb: Boolean, val nivel: String?, val elev: Double?, val tipo: String? = null) {
     /** Hay tubo y elevación (por cota o por nivel con cota): se puede cargar sin preguntar. */
     fun completa() = tubo != null && elev != null
 }
@@ -90,28 +91,50 @@ object Planos {
                 MutableList(h.length()) { j ->
                     val x = h.getJSONObject(j)
                     Hallazgo(x.optString("t", "otro"), x.optInt("u", 1), x.optDouble("e", 0.0), x.optString("d"), x.optBoolean("m", false),
-                        x.optInt("lv", 0), x.optString("f", ""))
+                        x.optString("lv", "").let { if (it == "0") "" else it }, x.optString("f", ""))
                 },
-                sortedMapOf<Int, Double>().apply {
-                    o.optJSONObject("nv")?.let { nv -> nv.keys().forEach { k -> k.toIntOrNull()?.let { put(it, nv.optDouble(k)) } } }
-                })
+                ordenarNiveles(mutableMapOf<String, Double>().apply {
+                    o.optJSONObject("nv")?.let { nv -> nv.keys().forEach { k -> put(k, nv.optDouble(k)) } }
+                }))
         }
     }.getOrDefault(mutableListOf())
 
     // ---------- Niveles ----------
 
-    /** Texto editable de los niveles: una línea por nivel, "3 = 12,5". */
+    /** Niveles ordenados de abajo hacia arriba (por cota). */
+    fun ordenarNiveles(m: Map<String, Double>): MutableMap<String, Double> =
+        m.entries.sortedBy { it.value }.associateTo(linkedMapOf()) { it.key to it.value }
+
+    /** Nombre normalizado de un nivel: "nivel 3" / "n3" → "3"; "eap" → "EAP". */
+    fun nombreNivel(s: String): String {
+        val t = s.trim().uppercase(Locale.ROOT).replace(Regex("""\s+"""), " ")
+        Regex("""^(?:NIVEL|NIV|NV|N)\s*\.?\s*(\d{1,3})$""").find(t)?.let { return it.groupValues[1].trimStart('0').ifEmpty { "0" } }
+        return t.replace(" ", "")
+    }
+
+    /** Cota del nivel [nv] (sin importar mayúsculas), o null si no está definido. */
+    fun cota(p: Plano, nv: String): Double? = nombreNivel(nv).takeIf { it.isNotEmpty() }?.let { p.niveles[it] }
+
+    /** Etiqueta corta del nivel: "N3" si es número, "EAP" si tiene nombre. */
+    fun etiquetaNivel(nv: String) = if (nv.isEmpty()) "" else if (nv.all { it.isDigit() }) "N$nv" else nv
+
+    /** Texto editable de los niveles: una línea por nivel, "3 = 12,5" o "EAP = 5,2". */
     fun nivelesTexto(p: Plano) = p.niveles.entries.joinToString("\n") { "${it.key} = ${num(it.value, 2)}" }
 
-    /** Lee los niveles desde el texto ("3 = 12,5", "3: 12.5", "Nivel 3 = 12,5"); null si una línea no se entiende. */
-    fun leerNiveles(txt: String): MutableMap<Int, Double>? {
-        val r = sortedMapOf<Int, Double>()
-        val re = Regex("""^(?:n(?:ivel|iv|v)?\.?\s*)?(\d{1,3})\s*(?:=|:|\s)\s*\+?\s*(-?\d+(?:[.,]\d+)?)\s*m?$""", RegexOption.IGNORE_CASE)
+    /**
+     * Lee los niveles desde el texto ("3 = 12,5", "Nivel 3: 12.5", "EAP = 5,2", "EAS 8,4"); null si una línea
+     * no se entiende. El nombre puede ser número o letras/números (hasta 10 caracteres).
+     */
+    fun leerNiveles(txt: String): MutableMap<String, Double>? {
+        val r = mutableMapOf<String, Double>()
+        val re = Regex("""^(.{1,16}?)\s*(?:=|:|\s)\s*\+?\s*(-?\d+(?:[.,]\d+)?)\s*m?$""", RegexOption.IGNORE_CASE)
         for (l in txt.lines().map { it.trim() }.filter { it.isNotEmpty() }) {
             val m = re.find(l) ?: return null
-            r[m.groupValues[1].toInt()] = m.groupValues[2].replace(',', '.').toDouble()
+            val n = nombreNivel(m.groupValues[1])
+            if (n.isEmpty() || n.length > 10 || !n.all { it.isLetterOrDigit() || it == '-' || it == '_' }) return null
+            r[n] = m.groupValues[2].replace(',', '.').toDouble()
         }
-        return r
+        return ordenarNiveles(r)
     }
 
     // ---------- Lectura de la marca escrita en la pared ----------
@@ -140,11 +163,14 @@ object Planos {
         if (tubo == null) Regex("""\b(?:tubo|tb|t)\s*[.#:°º-]?\s*(\d{1,4})\b""").find(t)?.let {
             val n = it.groupValues[1].toInt(); if (ok(n)) tubo = n
         }
-        val nivel = Regex("""\b(?:nivel|niv|nv|n)\s*[.#:°º-]?\s*(\d{1,2})\b""").find(t)?.groupValues?.get(1)?.toInt()
+        // Nivel con nombre definido en la pared (ej. "EAP 50-51"), o "Nivel 3" / "N3"
+        val nombrado = p.niveles.keys.filter { k -> !k.all { it.isDigit() } }.sortedByDescending { it.length }
+            .firstOrNull { k -> Regex("""(?<![a-z0-9])${Regex.escape(k.lowercase(Locale.ROOT))}(?![a-z0-9])""").containsMatchIn(t) }
+        val nivel = nombrado ?: Regex("""\b(?:nivel|niv|nv|n)\s*[.#:°º-]?\s*(\d{1,2})\b""").find(t)?.groupValues?.get(1)?.toInt()?.toString()
         val cota = Regex("""(?:\bcota|\belev\w*|\+)\s*(-?\d{1,3}(?:[.,]\d{1,2})?)""").find(t)?.groupValues?.get(1)
             ?: Regex("""\b(-?\d{1,3}(?:[.,]\d{1,2})?)\s*(?:m|mt|mts)\b""").find(t)?.groupValues?.get(1)
         val e = cota?.replace(',', '.')?.toDoubleOrNull()?.takeIf { it in p.elevMin..p.elevMax }
-            ?: nivel?.let { p.niveles[it] }
+            ?: nivel?.let { cota(p, it) }
         if (tubo == null && nivel == null && e == null) return null
         // Tipo escrito junto a la marca (ej. "Abolladura N3 50-51"); si no hay, se usa el tipo elegido en el plano
         val tipo = listOf("adel" to "adelg", "abol" to "abol", "eros" to "eros", "fisu" to "fisur",
@@ -162,7 +188,7 @@ object Planos {
     fun ajustar(p: Plano, h: Hallazgo) {
         if (h.memb && p.tubos < 2) h.memb = false
         h.tubo = h.tubo.coerceIn(1, if (h.memb) p.tubos - 1 else p.tubos)
-        if (h.nivel > 0) p.niveles[h.nivel]?.let { h.elev = it }
+        if (h.nivel.isNotEmpty()) cota(p, h.nivel)?.let { h.elev = it }
         h.elev = h.elev.coerceIn(p.elevMin, p.elevMax)
     }
     private fun yElev(p: Plano, e: Double) = Y1 - ((e - p.elevMin) / (p.elevMax - p.elevMin)).toFloat() * (Y1 - Y0)
@@ -289,6 +315,18 @@ object Planos {
             if (j > 0 && e < p.elevMax - 1e-9) c.drawLine(X0, y, X1, y, lg)
             if (ultimoY - y >= 28f) { c.drawText(num(e), X0 - 12f, y + 8f, numElev); ultimoY = y }
         }
+        // Niveles definidos en la pared: línea de color con su nombre y cota a la derecha
+        val lNv = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0E7C86"); strokeWidth = 2f
+            pathEffect = DashPathEffect(floatArrayOf(14f, 6f, 3f, 6f), 0f) }
+        val tNv = pinta(19f, Color.parseColor("#0E7C86"), true, Paint.Align.RIGHT)
+        val haloNv = Paint(tNv).apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 6f }
+        p.niveles.forEach { (k, v) ->
+            if (v < p.elevMin || v > p.elevMax) return@forEach
+            val y = yElev(p, v)
+            c.drawLine(X0, y, X1, y, lNv)
+            val et = "${etiquetaNivel(k)} · ${num(v, 2)}"
+            c.drawText(et, X1 - 6f, y - 6f, haloNv); c.drawText(et, X1 - 6f, y - 6f, tNv)
+        }
         c.save(); c.rotate(-90f, 30f, (Y0 + Y1) / 2)
         c.drawText("Elevación (m)", 30f, (Y0 + Y1) / 2 + 8f, pinta(25f, tenue, alin = Paint.Align.CENTER))
         c.restore()
@@ -343,7 +381,7 @@ object Planos {
             if (celda.measureText(d) > maxDesc) {
                 d = d.take(celda.breakText(d, true, maxDesc - celda.measureText("…"), null)).trimEnd() + "…"
             }
-            listOf(codigo(i), tipo(h.tipo).nombre, h.ubicacion(), num(h.elev) + (if (h.nivel > 0) " · N${h.nivel}" else ""), "", d)
+            listOf(codigo(i), tipo(h.tipo).nombre, h.ubicacion(), num(h.elev) + (if (h.nivel.isNotEmpty()) " · ${etiquetaNivel(h.nivel)}" else ""), "", d)
                 .forEachIndexed { cI, s -> if (s.isNotEmpty()) c.drawText(s, cols[cI] + 10f, y + 27f, celda) }
             // Foto: "Sí" en verde si el hallazgo tiene foto adjunta; "—" si no
             if (h.foto.isNotBlank()) c.drawText("Sí", cols[4] + 10f, y + 27f, pinta(23f, Color.parseColor("#2E7D32"), true))
