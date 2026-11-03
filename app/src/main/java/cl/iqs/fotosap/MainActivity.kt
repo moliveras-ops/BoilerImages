@@ -229,6 +229,11 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().remove("pendUri").apply()
         android.util.Log.i("BoilerImage", "camara ok=$ok modo=$modo uri=$uri")
 
+        if (modo == "planoFoto") {
+            if (ok && uri != null) fotoPlanoLista(uri)
+            else { trasFotoPlano = null; uri?.let { runCatching { contentResolver.delete(it, null, null) } } }
+            return
+        }
         if (modo == "nombre") {
             if (ok && uri != null) leerNombreDe(uri, true) else uri?.let { runCatching { contentResolver.delete(it, null, null) } }
             return
@@ -3448,6 +3453,72 @@ class MainActivity : AppCompatActivity() {
     private fun guardarPlanos(l: List<Plano>) { prefs.edit().putString("planos_$evento", Planos.aJson(l)).apply() }
     private fun rutaPlanos() = "$raiz/$evento/Planos/"
     private fun nombreImagenPlano(p: Plano) = "Plano ${limpiar(p.titulo)}.png"
+    private fun rutaFotosPlano() = "${rutaPlanos()}Fotos/"
+
+    /** Destino de la foto de hallazgo en curso (cámara o galería): nombre del archivo y texto leído. */
+    private var trasFotoPlano: ((String, String) -> Unit)? = null
+    private var fotoPlanoLeer = true
+    private var fotoPlanoNombre = ""
+    private var fotoPlanoPlano: Plano? = null
+    private val elegirFotoPlano = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) { trasFotoPlano = null; return@registerForActivityResult }
+        val destino = crearImagen(rutaFotosPlano(), fotoPlanoNombre)
+        val ok = destino != null && runCatching {
+            contentResolver.openInputStream(uri)!!.use { i -> contentResolver.openOutputStream(destino)!!.use { o -> i.copyTo(o) } }
+        }.isSuccess
+        if (!ok) { destino?.let { runCatching { contentResolver.delete(it, null, null) } }; trasFotoPlano = null; aviso("No se pudo copiar la imagen"); return@registerForActivityResult }
+        fotoPlanoLista(destino!!)
+    }
+
+    /** Foto para un hallazgo: con la cámara o desde la galería; se guarda en <evento>/Planos/Fotos/. */
+    private fun pedirFotoPlano(p: Plano, leer: Boolean, luego: (String, String) -> Unit) {
+        fotoPlanoNombre = "${limpiar(p.titulo)} " + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(java.util.Date()) + ".jpg"
+        fotoPlanoLeer = leer; fotoPlanoPlano = p
+        menuGrande("Foto del hallazgo", listOf(
+            "📷  Tomar foto" + (if (leer) "\nEncuadra la marca escrita, ej. \"Nivel 3 entre 50-51\"" else "") to {
+                trasFotoPlano = luego
+                val u = crearImagen(rutaFotosPlano(), fotoPlanoNombre)
+                if (u == null) { trasFotoPlano = null; aviso("No se pudo crear el archivo") } else lanzarCamara(u, "planoFoto")
+            },
+            "🖼  Subir imagen de la galería" to {
+                trasFotoPlano = luego
+                runCatching { elegirFotoPlano.launch("image/*") }.onFailure { trasFotoPlano = null; aviso("No hay galería disponible") }
+            }))
+    }
+
+    /** La foto ya está guardada: lee su texto (si corresponde) y sigue con [trasFotoPlano]. */
+    private fun fotoPlanoLista(uri: Uri) {
+        val luego = trasFotoPlano ?: return
+        trasFotoPlano = null
+        val nombre = fotoPlanoNombre
+        if (!fotoPlanoLeer) { luego(nombre, ""); return }
+        val espera = AlertDialog.Builder(this).setMessage("Leyendo la marca de la foto…").setCancelable(false).show()
+        val bmp = runCatching { cargarBitmap(uri, 2000) }.getOrNull()
+        fun fin(t: String) { runCatching { espera.dismiss() }; luego(nombre, t) }
+        if (bmp == null) { fin(""); return }
+        val cliente = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        val giros = listOf(0, 90, 270)
+        var primero = ""
+        fun intentar(i: Int) {
+            if (i >= giros.size) { fin(primero); return }
+            cliente.process(InputImage.fromBitmap(bmp, giros[i]))
+                .addOnSuccessListener { r ->
+                    val t = r.text.trim()
+                    if (primero.isEmpty()) primero = t
+                    // sirve si se entiende una ubicación; si no, prueba la imagen girada
+                    val plano = fotoPlanoPlano
+                    if (t.isNotEmpty() && (plano == null || Planos.interpretar(plano, t) != null)) fin(t) else intentar(i + 1)
+                }
+                .addOnFailureListener { intentar(i + 1) }
+        }
+        intentar(0)
+    }
+
+    private fun abrirFotoPlano(nombre: String) {
+        val u = buscarArchivo(rutaFotosPlano(), nombre) ?: run { aviso("No se encontró la foto"); return }
+        runCatching { startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(u, "image/jpeg").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
+            .onFailure { aviso("No hay app para ver fotos") }
+    }
 
     private fun menuPlanos() {
         val l = planos()
@@ -3486,21 +3557,28 @@ class MainActivity : AppCompatActivity() {
         val e0 = campo("Elevación inferior (m)", Planos.num(p.elevMin), dec)
         val e1 = campo("Elevación superior (m)", Planos.num(p.elevMax), dec)
         val ePa = campo("Líneas de elevación cada (m)", Planos.num(p.paso), dec)
+        val eNv = campo("Niveles: uno por línea, n° = cota (m)", Planos.nivelesTexto(p),
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE).apply { hint = "1 = 4,5\n2 = 8,0\n3 = 12,5"; minLines = 2 }
+        col.addView(texto("Con los niveles, \"Nivel 3\" escrito en la pared (o en el hallazgo) queda en su cota.", 12f))
         mostrar(AlertDialog.Builder(this).setTitle(titulo).setView(scroll(col))
             .setPositiveButton("Guardar") { _, _ ->
                 val n = eN.text.toString().trim().toIntOrNull()
                 val a = numero(e0.text.toString().trim()); val b = numero(e1.text.toString().trim())
                 val pa = numero(ePa.text.toString().trim())
+                val nv = Planos.leerNiveles(eNv.text.toString())
                 when {
                     eTit.text.isBlank() -> aviso("Falta el nombre")
                     n == null || n !in 2..1000 -> aviso("N° de tubos entre 2 y 1000")
                     a == null || b == null || b <= a -> aviso("La elevación superior debe ser mayor que la inferior")
                     pa == null || pa <= 0 -> aviso("El paso de las líneas debe ser mayor que 0")
+                    nv == null -> aviso("Niveles: escribe una línea por nivel, ej. 3 = 12,5")
+                    nv.values.any { it < a || it > b } -> aviso("Las cotas de los niveles deben estar entre ${Planos.num(a)} y ${Planos.num(b)} m")
                     else -> {
+                        p.niveles = nv
                         p.titulo = limpiar(eTit.text.toString()); p.subtitulo = eSub.text.toString().trim()
                         p.tubos = n; p.elevMin = a; p.elevMax = b; p.paso = pa
                         p.hallazgos.forEach { Planos.ajustar(p, it) }
-                        prefs.edit().putString("plano_ultimo", Planos.aJson(listOf(Plano("", "", n, a, b, pa))).trim('[', ']')).apply()
+                        prefs.edit().putString("plano_ultimo", Planos.aJson(listOf(Plano("", "", n, a, b, pa, niveles = nv))).trim('[', ']')).apply()
                         ok()
                     }
                 }
@@ -3570,9 +3648,11 @@ class MainActivity : AppCompatActivity() {
             val h = Planos.hallazgoEn(p, x, y)
             if (h >= 0) {
                 vista.sel = h; vista.invalidate()
-                dialogoHallazgo(p, p.hallazgos[h], Planos.codigo(h), tipoAct, null,
+                val hh = p.hallazgos[h]
+                dialogoHallazgo(p, hh, Planos.codigo(h), tipoAct, null,
                     alBorrar = { p.hallazgos.removeAt(h); vista.sel = -1; cambio() },
-                    alCerrar = { vista.sel = -1; vista.invalidate() }) { cambio() }
+                    alCerrar = { vista.sel = -1; vista.invalidate() },
+                    alFoto = { pedirFotoPlano(p, false) { nombre, _ -> hh.foto = nombre; cambio() } }) { cambio() }
             } else Planos.ubicar(p, x, y)?.let { prop ->
                 dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), tipoAct, prop) { nuevo ->
                     p.hallazgos.add(nuevo); cambio()
@@ -3581,6 +3661,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         val acciones = filaOscura()
+        acciones.addView(accionOscura(R.drawable.ic_camara, "Foto") {
+            // Foto del hallazgo: lee la marca escrita en la pared (ej. "Nivel 3 entre 50-51") y propone la ubicación
+            pedirFotoPlano(p, true) { nombre, texto ->
+                val l = Planos.interpretar(p, texto)
+                val prop = Hallazgo("", l?.tubo ?: 1, l?.elev ?: p.elevMin, "", l?.memb ?: false, l?.nivel ?: 0, nombre)
+                when {
+                    l == null -> aviso(if (texto.isBlank()) "No se encontró texto en la foto: completa la ubicación"
+                                       else "No se entendió la ubicación: complétala")
+                    l.tubo == null -> aviso("No se encontró el tubo: complétalo")
+                    l.nivel != null && l.elev == null -> aviso("El nivel ${l.nivel} no tiene cota en el plano: ingresa la elevación o defínela en \"Pared\"")
+                }
+                dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), tipoAct, prop, leido = texto) { nuevo ->
+                    p.hallazgos.add(nuevo); cambio()
+                }
+            }
+        })
         acciones.addView(accionOscura(R.drawable.ic_editar, "Pared") {
             configPlano(p, "Datos de la pared") { cambio() }
         })
@@ -3608,8 +3704,24 @@ class MainActivity : AppCompatActivity() {
 
     /** Diálogo para crear ([h] null, con la ubicación propuesta [prop]) o editar un hallazgo. */
     private fun dialogoHallazgo(p: Plano, h: Hallazgo?, codigo: String, tipoIni: String, prop: Hallazgo?,
-                                alBorrar: (() -> Unit)? = null, alCerrar: () -> Unit = {}, ok: (Hallazgo) -> Unit) {
+                                alBorrar: (() -> Unit)? = null, alCerrar: () -> Unit = {}, leido: String = "",
+                                alFoto: (() -> Unit)? = null, ok: (Hallazgo) -> Unit) {
         val col = columna()
+        var dlgH: AlertDialog? = null
+        val fotoH = (h ?: prop)?.foto ?: ""
+        if (fotoH.isNotBlank()) {
+            val u = buscarArchivo(rutaFotosPlano(), fotoH)
+            val bmp = u?.let { runCatching { cargarBitmap(it, 900) }.getOrNull() }
+            if (bmp != null) col.addView(ImageView(this).apply {
+                setImageBitmap(bmp); adjustViewBounds = true; scaleType = ImageView.ScaleType.FIT_CENTER
+                maxHeight = dp(220); setOnClickListener { abrirFotoPlano(fotoH) }
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            else col.addView(texto("📷 $fotoH (no se encontró el archivo)", 12f))
+        }
+        if (leido.isNotBlank()) col.addView(texto("Texto leído: \"${leido.replace('\n', ' ').take(120)}\"", 13f))
+        if (alFoto != null) col.addView(boton(if (fotoH.isBlank()) "📷  Adjuntar foto" else "📷  Cambiar foto") {
+            dlgH?.dismiss(); alFoto()
+        })
         val nombres = Planos.tipos.map { it.nombre }
         val sp = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, nombres)
@@ -3640,6 +3752,7 @@ class MainActivity : AppCompatActivity() {
         }
         val eTubo = mitad("Tubo (1 a ${p.tubos})", "${base.tubo}", InputType.TYPE_CLASS_NUMBER)
         val etTubo = (eTubo.parent as LinearLayout).getChildAt(0) as TextView
+        val eNivel = mitad("Nivel", if (base.nivel > 0) "${base.nivel}" else "", InputType.TYPE_CLASS_NUMBER)
         val eElev = mitad("Elevación (m)", Planos.num(base.elev),
             InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED)
         col.addView(fila)
@@ -3662,6 +3775,16 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: android.text.Editable?) = actUbic()
         })
         actUbic()
+        // Nivel con cota en la tabla del plano → completa la elevación
+        eNivel.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                s?.toString()?.trim()?.toIntOrNull()?.let { p.niveles[it] }?.let { eElev.setText(Planos.num(it)) }
+            }
+        })
+        if (p.niveles.isEmpty()) col.addView(texto("Para usar niveles, define sus cotas en \"Pared\".", 12f))
+        else col.addView(texto("Niveles: " + p.niveles.entries.joinToString(" · ") { "N${it.key} = ${Planos.num(it.value)} m" }, 12f))
         col.addView(texto("Descripción", 13f))
         val eDesc = EditText(this).apply {
             hint = "Ej.: espesor 3,1 mm (nom. 4,0)"
@@ -3676,14 +3799,18 @@ class MainActivity : AppCompatActivity() {
                 val e = numero(eElev.text.toString().trim())
                 val m = grupo.checkedRadioButtonId == rMemb.id
                 val maxT = if (m) p.tubos - 1 else p.tubos
+                val nvTxt = eNivel.text.toString().trim()
+                val nv = if (nvTxt.isEmpty()) 0 else nvTxt.toIntOrNull() ?: -1
                 when {
                     t == null || t !in 1..maxT -> aviso(if (m) "En membrana, el tubo izquierdo debe estar entre 1 y $maxT"
                                                         else "El tubo debe estar entre 1 y ${p.tubos}")
+                    nv < 0 -> aviso("El nivel debe ser un número")
                     e == null || e < p.elevMin || e > p.elevMax ->
                         aviso("La elevación debe estar entre ${Planos.num(p.elevMin)} y ${Planos.num(p.elevMax)} m")
                     else -> {
                         val x = h ?: Hallazgo("", 0, 0.0, "")
-                        x.tipo = Planos.tipos[sp.selectedItemPosition].clave; x.tubo = t; x.elev = e; x.memb = m
+                        x.tipo = Planos.tipos[sp.selectedItemPosition].clave; x.tubo = t; x.elev = e; x.memb = m; x.nivel = nv
+                        if (h == null) x.foto = fotoH
                         x.desc = eDesc.text.toString().trim()
                         ok(x)
                     }
@@ -3692,7 +3819,8 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Cancelar", null)
             .setOnDismissListener { alCerrar() }
         if (alBorrar != null) b.setNeutralButton("Eliminar") { _, _ -> alBorrar() }
-        mostrar(b.create())
+        val d = b.create(); dlgH = d
+        mostrar(d)
     }
 
     /** Guarda (o reemplaza) la lámina del plano como PNG en <evento>/Planos/. */
@@ -3844,6 +3972,7 @@ class MainActivity : AppCompatActivity() {
                     "medBase" -> "Foto de la zona" to "Espesores: después tocas cada punto medido"
                     "medidor" -> "Foto del medidor" to "Encuadra la pantalla del medidor; la lectura es automática"
                     "nombre" -> "Foto del nombre" to "Placa o rótulo con el nombre de la carpeta"
+                    "planoFoto" -> "Foto del hallazgo" to "Encuadra la marca escrita, ej. Nivel 3 entre 50-51"
                     else -> "Foto" to null
                 }
                 val i = Intent(this, CamaraActivity::class.java).putExtra("destino", uri.toString())

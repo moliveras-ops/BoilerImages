@@ -16,7 +16,8 @@ import java.util.Locale
  * Hallazgo marcado en un plano: tipo, tubo (1..n, de izquierda a derecha) y elevación en metros.
  * Si [memb] es true el hallazgo está en la membrana entre el tubo [tubo] y el [tubo] + 1.
  */
-class Hallazgo(var tipo: String, var tubo: Int, var elev: Double, var desc: String, var memb: Boolean = false) {
+class Hallazgo(var tipo: String, var tubo: Int, var elev: Double, var desc: String, var memb: Boolean = false,
+               var nivel: Int = 0, var foto: String = "") {
     /** Ubicación para tablas: "T 12" o "M 12–13". */
     fun ubicacion() = if (memb) "M $tubo–${tubo + 1}" else "T $tubo"
 }
@@ -24,7 +25,12 @@ class Hallazgo(var tipo: String, var tubo: Int, var elev: Double, var desc: Stri
 /** Plano de ubicación de una pared: grilla de tubos × elevaciones con los hallazgos marcados. */
 class Plano(var titulo: String, var subtitulo: String, var tubos: Int,
             var elevMin: Double, var elevMax: Double, var paso: Double,
-            val hallazgos: MutableList<Hallazgo> = mutableListOf())
+            val hallazgos: MutableList<Hallazgo> = mutableListOf(),
+            /** Cota en metros de cada nivel (ej. 3 → 12,5). */
+            var niveles: MutableMap<Int, Double> = sortedMapOf())
+
+/** Ubicación leída del texto de una foto (ej. "Nivel 3 entre 50-51"). */
+class Lectura(val tubo: Int?, val memb: Boolean, val nivel: Int?, val elev: Double?)
 
 /**
  * Dibujo de los planos. Todo se dibuja en unidades de una lámina de [W] de ancho; la vista en pantalla
@@ -63,8 +69,10 @@ object Planos {
             put(JSONObject().put("ti", p.titulo).put("su", p.subtitulo).put("n", p.tubos)
                 .put("e0", p.elevMin).put("e1", p.elevMax).put("pa", p.paso)
                 .put("h", JSONArray().apply {
-                    p.hallazgos.forEach { put(JSONObject().put("t", it.tipo).put("u", it.tubo).put("e", it.elev).put("d", it.desc).put("m", it.memb)) }
-                }))
+                    p.hallazgos.forEach { put(JSONObject().put("t", it.tipo).put("u", it.tubo).put("e", it.elev).put("d", it.desc).put("m", it.memb)
+                        .put("lv", it.nivel).put("f", it.foto)) }
+                })
+                .put("nv", JSONObject().apply { p.niveles.forEach { (k, v) -> put("$k", v) } }))
         }
     }.toString()
 
@@ -77,10 +85,65 @@ object Planos {
                 o.optDouble("e0", 0.0), o.optDouble("e1", 30.0), o.optDouble("pa", 2.5),
                 MutableList(h.length()) { j ->
                     val x = h.getJSONObject(j)
-                    Hallazgo(x.optString("t", "otro"), x.optInt("u", 1), x.optDouble("e", 0.0), x.optString("d"), x.optBoolean("m", false))
+                    Hallazgo(x.optString("t", "otro"), x.optInt("u", 1), x.optDouble("e", 0.0), x.optString("d"), x.optBoolean("m", false),
+                        x.optInt("lv", 0), x.optString("f", ""))
+                },
+                sortedMapOf<Int, Double>().apply {
+                    o.optJSONObject("nv")?.let { nv -> nv.keys().forEach { k -> k.toIntOrNull()?.let { put(it, nv.optDouble(k)) } } }
                 })
         }
     }.getOrDefault(mutableListOf())
+
+    // ---------- Niveles ----------
+
+    /** Texto editable de los niveles: una línea por nivel, "3 = 12,5". */
+    fun nivelesTexto(p: Plano) = p.niveles.entries.joinToString("\n") { "${it.key} = ${num(it.value, 2)}" }
+
+    /** Lee los niveles desde el texto ("3 = 12,5", "3: 12.5", "Nivel 3 = 12,5"); null si una línea no se entiende. */
+    fun leerNiveles(txt: String): MutableMap<Int, Double>? {
+        val r = sortedMapOf<Int, Double>()
+        val re = Regex("""^(?:n(?:ivel|iv|v)?\.?\s*)?(\d{1,3})\s*(?:=|:|\s)\s*\+?\s*(-?\d+(?:[.,]\d+)?)\s*m?$""", RegexOption.IGNORE_CASE)
+        for (l in txt.lines().map { it.trim() }.filter { it.isNotEmpty() }) {
+            val m = re.find(l) ?: return null
+            r[m.groupValues[1].toInt()] = m.groupValues[2].replace(',', '.').toDouble()
+        }
+        return r
+    }
+
+    // ---------- Lectura de la marca escrita en la pared ----------
+
+    /**
+     * Interpreta el texto reconocido en la foto: "Nivel 3 entre 50-51", "N3 T50", "nv 2 tubo 14",
+     * "50-51 +12,5 m". Dos tubos seguidos = membrana. Corrige confusiones típicas (O→0, l/I→1).
+     * null si no se encontró ni tubo, ni nivel, ni cota.
+     */
+    fun interpretar(p: Plano, texto: String): Lectura? {
+        var t = java.text.Normalizer.normalize(texto.lowercase(Locale.ROOT), java.text.Normalizer.Form.NFD)
+            .replace(Regex("""\p{Mn}+"""), "").replace('\n', ' ').replace('–', '-').replace('—', '-')
+        t = Regex("""(?<=\d)o|(?<![a-z])o(?=\d)""").replace(t, "0")
+        t = Regex("""(?<=\d)[li|]|(?<![a-z])[li|](?=\d)""").replace(t, "1")
+        fun ok(n: Int) = n in 1..p.tubos
+
+        var tubo: Int? = null; var memb = false
+        val par = Regex("""\bentre\s*(?:(?:los\s*)?tubos?\s*)?(\d{1,4})\s*(?:-|/|_|y|al|a|\s)\s*(\d{1,4})\b""").find(t)
+            ?: Regex("""\bm\s*\.?\s*(\d{1,4})\s*[-/_]\s*(\d{1,4})\b""").find(t)
+            ?: Regex("""\b(\d{1,4})\s*[-/_]\s*(\d{1,4})\b""").findAll(t)
+                .firstOrNull { Math.abs(it.groupValues[1].toInt() - it.groupValues[2].toInt()) == 1 }
+        if (par != null) {
+            val a = par.groupValues[1].toInt(); val b = par.groupValues[2].toInt()
+            if (ok(a) && ok(b)) { tubo = minOf(a, b); memb = a != b && minOf(a, b) < p.tubos }
+        }
+        if (tubo == null) Regex("""\b(?:tubo|tb|t)\s*[.#:°º-]?\s*(\d{1,4})\b""").find(t)?.let {
+            val n = it.groupValues[1].toInt(); if (ok(n)) tubo = n
+        }
+        val nivel = Regex("""\b(?:nivel|niv|nv|n)\s*[.#:°º-]?\s*(\d{1,2})\b""").find(t)?.groupValues?.get(1)?.toInt()
+        val cota = Regex("""(?:\bcota|\belev\w*|\+)\s*(-?\d{1,3}(?:[.,]\d{1,2})?)""").find(t)?.groupValues?.get(1)
+            ?: Regex("""\b(-?\d{1,3}(?:[.,]\d{1,2})?)\s*(?:m|mt|mts)\b""").find(t)?.groupValues?.get(1)
+        val e = cota?.replace(',', '.')?.toDoubleOrNull()?.takeIf { it in p.elevMin..p.elevMax }
+            ?: nivel?.let { p.niveles[it] }
+        if (tubo == null && nivel == null && e == null) return null
+        return Lectura(tubo, memb, nivel, e)
+    }
 
     // ---------- Geometría ----------
 
@@ -92,6 +155,7 @@ object Planos {
     fun ajustar(p: Plano, h: Hallazgo) {
         if (h.memb && p.tubos < 2) h.memb = false
         h.tubo = h.tubo.coerceIn(1, if (h.memb) p.tubos - 1 else p.tubos)
+        if (h.nivel > 0) p.niveles[h.nivel]?.let { h.elev = it }
         h.elev = h.elev.coerceIn(p.elevMin, p.elevMax)
     }
     private fun yElev(p: Plano, e: Double) = Y1 - ((e - p.elevMin) / (p.elevMax - p.elevMin)).toFloat() * (Y1 - Y0)
@@ -260,13 +324,13 @@ object Planos {
             if (celda.measureText(d) > maxDesc) {
                 d = d.take(celda.breakText(d, true, maxDesc - celda.measureText("…"), null)).trimEnd() + "…"
             }
-            listOf(codigo(i), tipo(h.tipo).nombre, h.ubicacion(), num(h.elev), d)
+            listOf(codigo(i), tipo(h.tipo).nombre, h.ubicacion(), num(h.elev) + (if (h.nivel > 0) " · N${h.nivel}" else ""), d)
                 .forEachIndexed { cI, s -> c.drawText(s, cols[cI] + 10f, y + 27f, celda) }
         }
         val fin = top + FILA * (p.hallazgos.size + 1)
         c.drawLine(X0, fin, X1, fin, ejes)
         if (p.hallazgos.isEmpty()) c.drawText("Sin hallazgos", X0 + 10f, fin + 26f, celda.apply { color = tenue })
-        else c.drawText("T = tubo · M 12–13 = membrana entre los tubos 12 y 13", X0 + 10f, fin + 26f, pinta(20f, tenue))
+        else c.drawText("T = tubo · M 12–13 = membrana entre los tubos 12 y 13 · N = nivel", X0 + 10f, fin + 26f, pinta(20f, tenue))
     }
 
     /** Imagen de la lámina para el informe, de [anchoPx] píxeles de ancho. */
