@@ -57,7 +57,7 @@ object Planos {
     private const val X1 = 972f
     private const val Y0 = 132f
     private const val Y1 = 1172f
-    private const val FILA = 40f
+    const val FILA = 40f
 
     private val tinta = Color.parseColor("#1B2530")
     private val tenue = Color.parseColor("#5D6B78")
@@ -211,7 +211,8 @@ object Planos {
         return l to (if (l.isEmpty()) Y1 + 96f else y + 26f)
     }
 
-    private fun topTabla(p: Plano) = leyenda(p).second + 22f
+    /** Y donde empieza la tabla de hallazgos (encabezado); cada fila mide [FILA]. */
+    fun topTabla(p: Plano) = leyenda(p).second + 22f
 
     /** Alto de la lámina en unidades (el ancho es [W]). */
     fun alto(p: Plano) = topTabla(p) + FILA * (p.hallazgos.size + 1) + 40f

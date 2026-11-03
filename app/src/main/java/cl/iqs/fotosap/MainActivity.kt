@@ -3702,6 +3702,7 @@ class MainActivity : AppCompatActivity() {
                     .onFailure { aviso("No hay app para compartir") }
             }
         })
+        acciones.addView(accionOscura(R.drawable.ic_tabla, "PDF") { exportarPdfPlano(p) })
         acciones.addView(accionOscura(R.drawable.ic_borrar, "Eliminar", Color.parseColor("#FF8A80")) {
             confirmar("¿Eliminar el plano ${p.titulo}? La imagen ya guardada no se borra.") {
                 lista.remove(p); guardarPlanos(lista); dlg.dismiss(); render()
@@ -3875,6 +3876,79 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 espera.dismiss()
                 if (uri == null) aviso("No se pudo guardar la imagen del plano") else luego(uri)
+            }
+        }.start()
+    }
+
+    // ---------- PDF del plano ----------
+    // Solo la lámina (plano, leyenda y tabla de hallazgos) en hoja A4 vertical (595 × 842 pt), entera en
+    // una hoja. Si hay tantos hallazgos que quedaría muy chica, va al ancho de la hoja y la tabla sigue en
+    // la hoja siguiente, cortando entre filas.
+
+    private fun nombrePdfPlano(p: Plano) = "Plano ${limpiar(p.titulo)}.pdf"
+
+    private fun generarPdfPlano(p: Plano): Uri? {
+        val pdf = android.graphics.pdf.PdfDocument()
+        val anchoH = 595; val altoH = 842; val mg = 28f
+        try {
+            val total = Planos.alto(p)
+            val sAncho = (anchoH - 2 * mg) / Planos.W
+            val sAlto = (altoH - 2 * mg) / total
+            val unaHoja = sAlto >= sAncho * 0.7f
+            val s = if (unaHoja) minOf(sAncho, sAlto) else sAncho
+            val porHoja = if (unaHoja) total else (altoH - 2 * mg) / s
+            val x0 = (anchoH - Planos.W * s) / 2
+            val top = Planos.topTabla(p)
+            var desde = 0f; var n = 0
+            while (desde < total - 1f) {
+                var hasta = desde + porHoja
+                if (hasta < total && hasta > top + Planos.FILA)   // cortar entre filas de la tabla
+                    hasta = top + Math.floor(((hasta - top) / Planos.FILA).toDouble()).toFloat() * Planos.FILA
+                if (hasta <= desde) hasta = desde + porHoja
+                hasta = minOf(hasta, total)
+                val pg = pdf.startPage(android.graphics.pdf.PdfDocument.PageInfo.Builder(anchoH, altoH, ++n).create())
+                val c = pg.canvas
+                c.save(); c.translate(x0, mg); c.scale(s, s)
+                c.clipRect(0f, 0f, Planos.W, hasta - desde)
+                c.translate(0f, -desde)
+                Planos.dibujar(c, p)
+                c.restore()
+                pdf.finishPage(pg)
+                desde = hasta
+            }
+            val ruta = rutaPlanos(); val nombre = nombrePdfPlano(p)
+            val uri = buscarArchivo(ruta, nombre) ?: contentResolver.insert(coleccion, ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, ruta)
+            }) ?: return null
+            contentResolver.openOutputStream(uri, "wt")?.use { pdf.writeTo(it) } ?: return null
+            return uri
+        } finally { pdf.close() }
+    }
+
+    private fun exportarPdfPlano(p: Plano) {
+        val espera = AlertDialog.Builder(this).setMessage("Generando PDF…").setCancelable(false).show()
+        Thread {
+            val res = runCatching { generarPdfPlano(p) }
+            runOnUiThread {
+                espera.dismiss()
+                val uri = res.getOrNull()
+                if (uri == null) { aviso("No se pudo generar el PDF" + (res.exceptionOrNull()?.message?.let { ": $it" } ?: "")); return@runOnUiThread }
+                mostrar(AlertDialog.Builder(this).setTitle("PDF listo")
+                    .setMessage("${rutaPlanos()}${nombrePdfPlano(p)}")
+                    .setPositiveButton("Abrir") { _, _ ->
+                        val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/pdf")
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        runCatching { startActivity(i) }.onFailure { aviso("No hay app para abrir PDF") }
+                    }
+                    .setNeutralButton("Compartir") { _, _ ->
+                        val i = Intent(Intent.ACTION_SEND).setType("application/pdf")
+                            .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        runCatching { startActivity(Intent.createChooser(i, "Compartir PDF")) }
+                            .onFailure { aviso("No hay app para compartir") }
+                    }
+                    .setNegativeButton("Cerrar", null).create())
             }
         }.start()
     }
