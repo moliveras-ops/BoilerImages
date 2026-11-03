@@ -12,8 +12,14 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 
-/** Hallazgo marcado en un plano: tipo, tubo (1..n, de izquierda a derecha) y elevación en metros. */
-class Hallazgo(var tipo: String, var tubo: Int, var elev: Double, var desc: String)
+/**
+ * Hallazgo marcado en un plano: tipo, tubo (1..n, de izquierda a derecha) y elevación en metros.
+ * Si [memb] es true el hallazgo está en la membrana entre el tubo [tubo] y el [tubo] + 1.
+ */
+class Hallazgo(var tipo: String, var tubo: Int, var elev: Double, var desc: String, var memb: Boolean = false) {
+    /** Ubicación para tablas: "T 12" o "M 12–13". */
+    fun ubicacion() = if (memb) "M $tubo–${tubo + 1}" else "T $tubo"
+}
 
 /** Plano de ubicación de una pared: grilla de tubos × elevaciones con los hallazgos marcados. */
 class Plano(var titulo: String, var subtitulo: String, var tubos: Int,
@@ -57,7 +63,7 @@ object Planos {
             put(JSONObject().put("ti", p.titulo).put("su", p.subtitulo).put("n", p.tubos)
                 .put("e0", p.elevMin).put("e1", p.elevMax).put("pa", p.paso)
                 .put("h", JSONArray().apply {
-                    p.hallazgos.forEach { put(JSONObject().put("t", it.tipo).put("u", it.tubo).put("e", it.elev).put("d", it.desc)) }
+                    p.hallazgos.forEach { put(JSONObject().put("t", it.tipo).put("u", it.tubo).put("e", it.elev).put("d", it.desc).put("m", it.memb)) }
                 }))
         }
     }.toString()
@@ -71,7 +77,7 @@ object Planos {
                 o.optDouble("e0", 0.0), o.optDouble("e1", 30.0), o.optDouble("pa", 2.5),
                 MutableList(h.length()) { j ->
                     val x = h.getJSONObject(j)
-                    Hallazgo(x.optString("t", "otro"), x.optInt("u", 1), x.optDouble("e", 0.0), x.optString("d"))
+                    Hallazgo(x.optString("t", "otro"), x.optInt("u", 1), x.optDouble("e", 0.0), x.optString("d"), x.optBoolean("m", false))
                 })
         }
     }.getOrDefault(mutableListOf())
@@ -79,21 +85,36 @@ object Planos {
     // ---------- Geometría ----------
 
     private fun xTubo(p: Plano, t: Int) = X0 + ((t - 0.5f) / p.tubos) * (X1 - X0)
+    /** X del hallazgo: centro del tubo, o el borde entre [tubo] y [tubo] + 1 si está en la membrana. */
+    private fun xH(p: Plano, h: Hallazgo) = if (h.memb) X0 + (h.tubo.toFloat() / p.tubos) * (X1 - X0) else xTubo(p, h.tubo)
+
+    /** Deja tubo y elevación dentro del plano (en membrana el tubo izquierdo llega hasta n − 1). */
+    fun ajustar(p: Plano, h: Hallazgo) {
+        if (h.memb && p.tubos < 2) h.memb = false
+        h.tubo = h.tubo.coerceIn(1, if (h.memb) p.tubos - 1 else p.tubos)
+        h.elev = h.elev.coerceIn(p.elevMin, p.elevMax)
+    }
     private fun yElev(p: Plano, e: Double) = Y1 - ((e - p.elevMin) / (p.elevMax - p.elevMin)).toFloat() * (Y1 - Y0)
 
-    /** Tubo y elevación (redondeada a 0,1 m) del punto tocado, o null si está fuera de la grilla. */
-    fun ubicar(p: Plano, x: Float, y: Float): Pair<Int, Double>? {
+    /**
+     * Ubicación propuesta para el punto tocado (elevación redondeada a 0,1 m), o null si está fuera de la
+     * grilla. Si el toque cae cerca del borde entre dos tubos se propone la membrana (tubo = el de la izquierda).
+     */
+    fun ubicar(p: Plano, x: Float, y: Float): Hallazgo? {
         if (x < X0 || x > X1 || y < Y0 || y > Y1) return null
-        val tubo = (((x - X0) / (X1 - X0) * p.tubos).toInt() + 1).coerceIn(1, p.tubos)
+        val pos = (x - X0) / (X1 - X0) * p.tubos              // 0..n; los bordes entre tubos son enteros
+        val borde = Math.round(pos)
+        val memb = borde in 1 until p.tubos && Math.abs(pos - borde) < 0.25f
+        val tubo = if (memb) borde else (pos.toInt() + 1).coerceIn(1, p.tubos)
         val e = p.elevMin + (Y1 - y) / (Y1 - Y0) * (p.elevMax - p.elevMin)
-        return tubo to Math.round(e * 10) / 10.0
+        return Hallazgo("", tubo, Math.round(e * 10) / 10.0, "", memb)
     }
 
     /** Índice del hallazgo más cercano al punto tocado (radio de 40 unidades), o -1. */
     fun hallazgoEn(p: Plano, x: Float, y: Float): Int {
         var mejor = -1; var dist = 40f
         p.hallazgos.forEachIndexed { i, h ->
-            val d = Math.hypot((xTubo(p, h.tubo) - x).toDouble(), (yElev(p, h.elev) - y).toDouble()).toFloat()
+            val d = Math.hypot((xH(p, h) - x).toDouble(), (yElev(p, h.elev) - y).toDouble()).toFloat()
             if (d < dist) { dist = d; mejor = i }
         }
         return mejor
@@ -121,7 +142,7 @@ object Planos {
     private fun topTabla(p: Plano) = leyenda(p).second + 22f
 
     /** Alto de la lámina en unidades (el ancho es [W]). */
-    fun alto(p: Plano) = topTabla(p) + FILA * (p.hallazgos.size + 1) + 30f
+    fun alto(p: Plano) = topTabla(p) + FILA * (p.hallazgos.size + 1) + 40f
 
     // ---------- Dibujo ----------
 
@@ -198,7 +219,7 @@ object Planos {
         val puestos = mutableListOf<PointF>()
         p.hallazgos.forEachIndexed { i, h ->
             val t = tipo(h.tipo)
-            val x = xTubo(p, h.tubo); val y = yElev(p, h.elev)
+            val x = xH(p, h); val y = yElev(p, h.elev)
             if (i == sel) c.drawCircle(x, y, 28f, Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.parseColor("#F5A300"); style = Paint.Style.STROKE; strokeWidth = 5f })
             marcador(c, t.forma, x, y, 13f, t.color)
@@ -225,10 +246,10 @@ object Planos {
 
         // Tabla de hallazgos
         val top = topTabla(p)
-        val cols = floatArrayOf(X0, X0 + 104f, X0 + 320f, X0 + 410f, X0 + 540f)
+        val cols = floatArrayOf(X0, X0 + 104f, X0 + 320f, X0 + 450f, X0 + 560f)
         c.drawRect(X0, top, X1, top + FILA, Paint().apply { color = acero })
         val cab = pinta(23f, Color.WHITE, true)
-        listOf("ID", "Tipo", "Tubo", "Elev. (m)", "Descripción").forEachIndexed { i, s -> c.drawText(s, cols[i] + 10f, top + 27f, cab) }
+        listOf("ID", "Tipo", "Ubicación", "Elev. (m)", "Descripción").forEachIndexed { i, s -> c.drawText(s, cols[i] + 10f, top + 27f, cab) }
         val celda = pinta(23f, tinta)
         val franja = Paint().apply { color = Color.parseColor("#F1F4F7") }
         p.hallazgos.forEachIndexed { i, h ->
@@ -239,12 +260,13 @@ object Planos {
             if (celda.measureText(d) > maxDesc) {
                 d = d.take(celda.breakText(d, true, maxDesc - celda.measureText("…"), null)).trimEnd() + "…"
             }
-            listOf(codigo(i), tipo(h.tipo).nombre, "${h.tubo}", num(h.elev), d)
+            listOf(codigo(i), tipo(h.tipo).nombre, h.ubicacion(), num(h.elev), d)
                 .forEachIndexed { cI, s -> c.drawText(s, cols[cI] + 10f, y + 27f, celda) }
         }
         val fin = top + FILA * (p.hallazgos.size + 1)
         c.drawLine(X0, fin, X1, fin, ejes)
         if (p.hallazgos.isEmpty()) c.drawText("Sin hallazgos", X0 + 10f, fin + 26f, celda.apply { color = tenue })
+        else c.drawText("T = tubo · M 12–13 = membrana entre los tubos 12 y 13", X0 + 10f, fin + 26f, pinta(20f, tenue))
     }
 
     /** Imagen de la lámina para el informe, de [anchoPx] píxeles de ancho. */

@@ -3499,7 +3499,7 @@ class MainActivity : AppCompatActivity() {
                     else -> {
                         p.titulo = limpiar(eTit.text.toString()); p.subtitulo = eSub.text.toString().trim()
                         p.tubos = n; p.elevMin = a; p.elevMax = b; p.paso = pa
-                        p.hallazgos.forEach { it.tubo = it.tubo.coerceIn(1, n); it.elev = it.elev.coerceIn(a, b) }
+                        p.hallazgos.forEach { Planos.ajustar(p, it) }
                         prefs.edit().putString("plano_ultimo", Planos.aJson(listOf(Plano("", "", n, a, b, pa))).trim('[', ']')).apply()
                         ok()
                     }
@@ -3570,11 +3570,11 @@ class MainActivity : AppCompatActivity() {
             val h = Planos.hallazgoEn(p, x, y)
             if (h >= 0) {
                 vista.sel = h; vista.invalidate()
-                dialogoHallazgo(p, p.hallazgos[h], Planos.codigo(h), tipoAct, 0, 0.0,
+                dialogoHallazgo(p, p.hallazgos[h], Planos.codigo(h), tipoAct, null,
                     alBorrar = { p.hallazgos.removeAt(h); vista.sel = -1; cambio() },
                     alCerrar = { vista.sel = -1; vista.invalidate() }) { cambio() }
-            } else Planos.ubicar(p, x, y)?.let { (tubo, e) ->
-                dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), tipoAct, tubo, e) { nuevo ->
+            } else Planos.ubicar(p, x, y)?.let { prop ->
+                dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), tipoAct, prop) { nuevo ->
                     p.hallazgos.add(nuevo); cambio()
                 }
             }
@@ -3606,8 +3606,8 @@ class MainActivity : AppCompatActivity() {
         dlg.show()
     }
 
-    /** Diálogo para crear ([h] null) o editar un hallazgo. */
-    private fun dialogoHallazgo(p: Plano, h: Hallazgo?, codigo: String, tipoIni: String, tubo: Int, elev: Double,
+    /** Diálogo para crear ([h] null, con la ubicación propuesta [prop]) o editar un hallazgo. */
+    private fun dialogoHallazgo(p: Plano, h: Hallazgo?, codigo: String, tipoIni: String, prop: Hallazgo?,
                                 alBorrar: (() -> Unit)? = null, alCerrar: () -> Unit = {}, ok: (Hallazgo) -> Unit) {
         val col = columna()
         val nombres = Planos.tipos.map { it.nombre }
@@ -3616,6 +3616,19 @@ class MainActivity : AppCompatActivity() {
             setSelection(Planos.tipos.indexOfFirst { it.clave == (h?.tipo ?: tipoIni) }.coerceAtLeast(0))
         }
         col.addView(texto("Tipo", 13f)); col.addView(sp)
+        val base = h ?: prop ?: Hallazgo("", 1, p.elevMin, "")
+        // Ubicación: en el tubo o en la membrana entre dos tubos
+        col.addView(texto("Ubicación", 13f))
+        val rTubo = RadioButton(this).apply { id = View.generateViewId(); text = "Tubo"; textSize = 17f; minHeight = dp(56) }
+        val rMemb = RadioButton(this).apply { id = View.generateViewId(); text = "Membrana"; textSize = 17f; minHeight = dp(56) }
+        val grupo = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            addView(rTubo, RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(rMemb, RadioGroup.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            check(if (base.memb && p.tubos >= 2) rMemb.id else rTubo.id)
+        }
+        if (p.tubos < 2) rMemb.isEnabled = false
+        col.addView(grupo)
         val fila = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun mitad(et: String, valor: String, tipo: Int): EditText {
             val c = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -3625,10 +3638,30 @@ class MainActivity : AppCompatActivity() {
             fila.addView(c, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
             return e
         }
-        val eTubo = mitad("Tubo (1 a ${p.tubos})", "${h?.tubo ?: tubo}", InputType.TYPE_CLASS_NUMBER)
-        val eElev = mitad("Elevación (m)", Planos.num(h?.elev ?: elev),
+        val eTubo = mitad("Tubo (1 a ${p.tubos})", "${base.tubo}", InputType.TYPE_CLASS_NUMBER)
+        val etTubo = (eTubo.parent as LinearLayout).getChildAt(0) as TextView
+        val eElev = mitad("Elevación (m)", Planos.num(base.elev),
             InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED)
         col.addView(fila)
+        val ubic = texto("", 14f)
+        col.addView(ubic)
+        fun actUbic() {
+            val m = grupo.checkedRadioButtonId == rMemb.id
+            etTubo.text = if (m) "Tubo izquierdo (1 a ${p.tubos - 1})" else "Tubo (1 a ${p.tubos})"
+            val t = eTubo.text.toString().trim().toIntOrNull()
+            ubic.text = when {
+                t == null -> ""
+                m -> "→ Membrana entre los tubos $t y ${t + 1}  (M $t–${t + 1})"
+                else -> "→ Tubo $t  (T $t)"
+            }
+        }
+        grupo.setOnCheckedChangeListener { _, _ -> actUbic() }
+        eTubo.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) = actUbic()
+        })
+        actUbic()
         col.addView(texto("Descripción", 13f))
         val eDesc = EditText(this).apply {
             hint = "Ej.: espesor 3,1 mm (nom. 4,0)"
@@ -3641,13 +3674,16 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Guardar") { _, _ ->
                 val t = eTubo.text.toString().trim().toIntOrNull()
                 val e = numero(eElev.text.toString().trim())
+                val m = grupo.checkedRadioButtonId == rMemb.id
+                val maxT = if (m) p.tubos - 1 else p.tubos
                 when {
-                    t == null || t !in 1..p.tubos -> aviso("El tubo debe estar entre 1 y ${p.tubos}")
+                    t == null || t !in 1..maxT -> aviso(if (m) "En membrana, el tubo izquierdo debe estar entre 1 y $maxT"
+                                                        else "El tubo debe estar entre 1 y ${p.tubos}")
                     e == null || e < p.elevMin || e > p.elevMax ->
                         aviso("La elevación debe estar entre ${Planos.num(p.elevMin)} y ${Planos.num(p.elevMax)} m")
                     else -> {
                         val x = h ?: Hallazgo("", 0, 0.0, "")
-                        x.tipo = Planos.tipos[sp.selectedItemPosition].clave; x.tubo = t; x.elev = e
+                        x.tipo = Planos.tipos[sp.selectedItemPosition].clave; x.tubo = t; x.elev = e; x.memb = m
                         x.desc = eDesc.text.toString().trim()
                         ok(x)
                     }
