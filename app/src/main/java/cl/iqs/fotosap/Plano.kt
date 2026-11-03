@@ -30,7 +30,10 @@ class Plano(var titulo: String, var subtitulo: String, var tubos: Int,
             var niveles: MutableMap<Int, Double> = sortedMapOf())
 
 /** Ubicación leída del texto de una foto (ej. "Nivel 3 entre 50-51"). */
-class Lectura(val tubo: Int?, val memb: Boolean, val nivel: Int?, val elev: Double?)
+class Lectura(val tubo: Int?, val memb: Boolean, val nivel: Int?, val elev: Double?, val tipo: String? = null) {
+    /** Hay tubo y elevación (por cota o por nivel con cota): se puede cargar sin preguntar. */
+    fun completa() = tubo != null && elev != null
+}
 
 /**
  * Dibujo de los planos. Todo se dibuja en unidades de una lámina de [W] de ancho; la vista en pantalla
@@ -143,7 +146,10 @@ object Planos {
         val e = cota?.replace(',', '.')?.toDoubleOrNull()?.takeIf { it in p.elevMin..p.elevMax }
             ?: nivel?.let { p.niveles[it] }
         if (tubo == null && nivel == null && e == null) return null
-        return Lectura(tubo, memb, nivel, e)
+        // Tipo escrito junto a la marca (ej. "Abolladura N3 50-51"); si no hay, se usa el tipo elegido en el plano
+        val tipo = listOf("adel" to "adelg", "abol" to "abol", "eros" to "eros", "fisu" to "fisur",
+            "grie" to "griet", "repa" to "repar").firstOrNull { t.contains(it.second) }?.first
+        return Lectura(tubo, memb, nivel, e, tipo)
     }
 
     // ---------- Geometría ----------

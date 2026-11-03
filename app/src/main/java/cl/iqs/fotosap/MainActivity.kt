@@ -3462,16 +3462,31 @@ class MainActivity : AppCompatActivity() {
     private var fotoPlanoPlano: Plano? = null
     private val elegirFotoPlano = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) { trasFotoPlano = null; return@registerForActivityResult }
-        val destino = crearImagen(rutaFotosPlano(), fotoPlanoNombre)
-        val ok = destino != null && runCatching {
-            contentResolver.openInputStream(uri)!!.use { i -> contentResolver.openOutputStream(destino)!!.use { o -> i.copyTo(o) } }
+        val destino = copiarFotoPlano(uri, fotoPlanoNombre)
+        if (destino == null) { trasFotoPlano = null; aviso("No se pudo copiar la imagen"); return@registerForActivityResult }
+        fotoPlanoLista(destino)
+    }
+
+    /** Destino de "Subir varias fotos": recibe las imágenes elegidas en la galería. */
+    private var trasVariasFotos: ((List<Uri>) -> Unit)? = null
+    private val elegirVariasFotosPlano = registerForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        val luego = trasVariasFotos; trasVariasFotos = null
+        if (luego != null && uris.isNotEmpty()) luego(uris)
+    }
+
+    /** Copia una imagen elegida a <evento>/Planos/Fotos/[nombre]; null si falla. */
+    private fun copiarFotoPlano(src: Uri, nombre: String): Uri? {
+        val destino = crearImagen(rutaFotosPlano(), nombre) ?: return null
+        val ok = runCatching {
+            contentResolver.openInputStream(src)!!.use { i -> contentResolver.openOutputStream(destino)!!.use { o -> i.copyTo(o) } }
         }.isSuccess
-        if (!ok) { destino?.let { runCatching { contentResolver.delete(it, null, null) } }; trasFotoPlano = null; aviso("No se pudo copiar la imagen"); return@registerForActivityResult }
-        fotoPlanoLista(destino!!)
+        if (!ok) { runCatching { contentResolver.delete(destino, null, null) }; return null }
+        return destino
     }
 
     /** Foto para un hallazgo: con la cámara o desde la galería; se guarda en <evento>/Planos/Fotos/. */
-    private fun pedirFotoPlano(p: Plano, leer: Boolean, luego: (String, String) -> Unit) {
+    private fun pedirFotoPlano(p: Plano, leer: Boolean, extra: List<Pair<String, () -> Unit>> = emptyList(),
+                               luego: (String, String) -> Unit) {
         fotoPlanoNombre = "${limpiar(p.titulo)} " + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(java.util.Date()) + ".jpg"
         fotoPlanoLeer = leer; fotoPlanoPlano = p
         menuGrande("Foto del hallazgo", listOf(
@@ -3483,7 +3498,7 @@ class MainActivity : AppCompatActivity() {
             "🖼  Subir imagen de la galería" to {
                 trasFotoPlano = luego
                 runCatching { elegirFotoPlano.launch("image/*") }.onFailure { trasFotoPlano = null; aviso("No hay galería disponible") }
-            }))
+            }) + extra)
     }
 
     /** La foto ya está guardada: lee su texto (si corresponde) y sigue con [trasFotoPlano]. */
@@ -3493,8 +3508,15 @@ class MainActivity : AppCompatActivity() {
         val nombre = fotoPlanoNombre
         if (!fotoPlanoLeer) { luego(nombre, ""); return }
         val espera = AlertDialog.Builder(this).setMessage("Leyendo la marca de la foto…").setCancelable(false).show()
+        leerMarcaFoto(uri, fotoPlanoPlano) { t -> runCatching { espera.dismiss() }; luego(nombre, t) }
+    }
+
+    /**
+     * Lee con ML Kit el texto escrito en la foto (prueba también girada 90° y 270°) y entrega el primero
+     * en que se entiende una ubicación para [plano]; si ninguno, el primer texto encontrado ("" si nada).
+     */
+    private fun leerMarcaFoto(uri: Uri, plano: Plano?, fin: (String) -> Unit) {
         val bmp = runCatching { cargarBitmap(uri, 2000) }.getOrNull()
-        fun fin(t: String) { runCatching { espera.dismiss() }; luego(nombre, t) }
         if (bmp == null) { fin(""); return }
         val cliente = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         val giros = listOf(0, 90, 270)
@@ -3506,7 +3528,6 @@ class MainActivity : AppCompatActivity() {
                     val t = r.text.trim()
                     if (primero.isEmpty()) primero = t
                     // sirve si se entiende una ubicación; si no, prueba la imagen girada
-                    val plano = fotoPlanoPlano
                     if (t.isNotEmpty() && (plano == null || Planos.interpretar(plano, t) != null)) fin(t) else intentar(i + 1)
                 }
                 .addOnFailureListener { intentar(i + 1) }
@@ -3667,21 +3688,113 @@ class MainActivity : AppCompatActivity() {
         }
 
         val acciones = filaOscura()
-        acciones.addView(accionOscura(R.drawable.ic_camara, "Foto") {
-            // Foto del hallazgo: lee la marca escrita en la pared (ej. "Nivel 3 entre 50-51") y propone la ubicación
-            pedirFotoPlano(p, true) { nombre, texto ->
-                val l = Planos.interpretar(p, texto)
-                val prop = Hallazgo("", l?.tubo ?: 1, l?.elev ?: p.elevMin, "", l?.memb ?: false, l?.nivel ?: 0, nombre)
-                when {
-                    l == null -> aviso(if (texto.isBlank()) "No se encontró texto en la foto: completa la ubicación"
-                                       else "No se entendió la ubicación: complétala")
-                    l.tubo == null -> aviso("No se encontró el tubo: complétalo")
-                    l.nivel != null && l.elev == null -> aviso("El nivel ${l.nivel} no tiene cota en el plano: ingresa la elevación o defínela en \"Pared\"")
+        /** Hallazgo nuevo con la ubicación leída en la foto; tipo leído o, si no hay, el elegido en los chips. */
+        fun desdeLectura(l: Lectura, nombre: String, texto: String) =
+            Hallazgo(l.tipo ?: tipoAct, l.tubo!!, l.elev!!, "", l.memb, l.nivel ?: 0, nombre).also { Planos.ajustar(p, it) }
+        fun resumenH(h: Hallazgo) = "${Planos.tipo(h.tipo).nombre} · ${h.ubicacion()} · ${Planos.num(h.elev)} m" +
+                (if (h.nivel > 0) " (N${h.nivel})" else "")
+        /** Otro hallazgo ya marcado en la misma ubicación (posible foto repetida). */
+        fun repetido(h: Hallazgo) = p.hallazgos.indexOfFirst {
+            it !== h && it.tubo == h.tubo && it.memb == h.memb && Math.abs(it.elev - h.elev) < 0.05 }
+
+        /** Formulario para completar a mano lo que no se pudo leer. */
+        fun completar(nombre: String, texto: String, sigue: () -> Unit = {}) {
+            val l = Planos.interpretar(p, texto)
+            val prop = Hallazgo(l?.tipo ?: "", l?.tubo ?: 1, l?.elev ?: p.elevMin, "", l?.memb ?: false, l?.nivel ?: 0, nombre)
+            when {
+                l == null -> aviso(if (texto.isBlank()) "No se encontró texto en la foto: completa la ubicación"
+                                   else "No se entendió la ubicación: complétala")
+                l.tubo == null -> aviso("No se encontró el tubo: complétalo")
+                l.nivel != null && l.elev == null -> aviso("El nivel ${l.nivel} no tiene cota en el plano: ingresa la elevación o defínela en \"Pared\"")
+            }
+            dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), l?.tipo ?: tipoAct, prop, leido = texto,
+                alCerrar = { vista.post { sigue() } }) { nuevo -> p.hallazgos.add(nuevo); cambio() }
+        }
+
+        /** Carga automática de una foto: si se leyó tubo y nivel/cota, el hallazgo queda guardado sin formulario. */
+        fun cargarFoto(nombre: String, texto: String) {
+            val l = Planos.interpretar(p, texto)
+            if (!prefs.getBoolean("plano_auto", true) || l == null || !l.completa()) { completar(nombre, texto); return }
+            val h = desdeLectura(l, nombre, texto)
+            p.hallazgos.add(h); cambio()
+            val idx = p.hallazgos.size - 1
+            vista.sel = idx; vista.invalidate()
+            val rep = repetido(h)
+            mostrar(AlertDialog.Builder(this).setTitle("✓ ${Planos.codigo(idx)} cargado")
+                .setMessage(resumenH(h) + "\n\nTexto leído: \"${texto.replace('\n', ' ').take(80)}\"" +
+                        (if (rep >= 0) "\n\n⚠ Ya existe ${Planos.codigo(rep)} en esa ubicación." else ""))
+                .setPositiveButton("Listo", null)
+                .setNeutralButton("Deshacer") { _, _ -> p.hallazgos.remove(h); vista.sel = -1; cambio() }
+                .setNegativeButton("Editar") { _, _ -> vista.post { editarHallazgo(p.hallazgos.indexOf(h)) } }
+                .setOnDismissListener { if (vista.sel == idx) { vista.sel = -1; vista.invalidate() } }
+                .create())
+        }
+
+        /** Varias fotos de la galería: cada una se lee y, si la marca está completa, se carga sola. */
+        fun cargarVarias(uris: List<Uri>) {
+            val base = "${limpiar(p.titulo)} " + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(java.util.Date())
+            val prog = texto("", 16f).apply { setPadding(dp(24), dp(20), dp(24), dp(8)) }
+            var cancelado = false
+            val espera = AlertDialog.Builder(this).setView(prog).setCancelable(false)
+                .setNegativeButton("Cancelar") { _, _ -> cancelado = true }.show()
+            val cargados = mutableListOf<Hallazgo>()
+            val pendientes = mutableListOf<Pair<String, String>>()   // foto, texto leído
+            var fallidas = 0
+            fun terminar() {
+                runCatching { espera.dismiss() }
+                if (cargados.isNotEmpty()) cambio()
+                val msg = StringBuilder()
+                if (cargados.isNotEmpty()) {
+                    msg.append("Cargados automáticamente: ${cargados.size}\n")
+                    cargados.forEach { h ->
+                        val i = p.hallazgos.indexOf(h); val rep = repetido(h)
+                        msg.append("• ${Planos.codigo(i)} ${resumenH(h)}" + (if (rep >= 0) "  ⚠ igual a ${Planos.codigo(rep)}" else "") + "\n")
+                    }
                 }
-                dialogoHallazgo(p, null, Planos.codigo(p.hallazgos.size), tipoAct, prop, leido = texto) { nuevo ->
-                    p.hallazgos.add(nuevo); cambio()
+                if (pendientes.isNotEmpty()) msg.append("\nSin ubicación completa: ${pendientes.size} (hay que completarlas)\n")
+                if (fallidas > 0) msg.append("\nNo se pudieron copiar: $fallidas\n")
+                if (cancelado) msg.append("\nSe canceló antes de terminar.\n")
+                fun siguientePendiente(k: Int) {
+                    if (k < pendientes.size) completar(pendientes[k].first, pendientes[k].second) { siguientePendiente(k + 1) }
+                }
+                val b = AlertDialog.Builder(this).setTitle("Fotos procesadas").setMessage(msg.toString().trim())
+                if (pendientes.isNotEmpty()) b.setPositiveButton("Completar ${pendientes.size}") { _, _ -> vista.post { siguientePendiente(0) } }
+                    .setNegativeButton("Después", null)
+                else b.setPositiveButton("Listo", null)
+                if (cargados.isNotEmpty()) b.setNeutralButton("Deshacer cargados") { _, _ ->
+                    p.hallazgos.removeAll(cargados.toSet()); cambio() }
+                mostrar(b.create())
+            }
+            fun paso(k: Int) {
+                if (k >= uris.size || cancelado) { terminar(); return }
+                prog.text = "Leyendo foto ${k + 1} de ${uris.size}…"
+                val nombre = base + "_" + "%02d".format(k + 1) + ".jpg"
+                val destino = copiarFotoPlano(uris[k], nombre)
+                if (destino == null) { fallidas++; paso(k + 1); return }
+                leerMarcaFoto(destino, p) { t ->
+                    val l = Planos.interpretar(p, t)
+                    if (prefs.getBoolean("plano_auto", true) && l != null && l.completa()) {
+                        val h = desdeLectura(l, nombre, t); p.hallazgos.add(h); cargados.add(h)
+                    } else pendientes.add(nombre to t)
+                    paso(k + 1)
                 }
             }
+            paso(0)
+        }
+
+        acciones.addView(accionOscura(R.drawable.ic_camara, "Foto") {
+            // Foto del hallazgo: lee la marca escrita en la pared (ej. "Nivel 3 entre 50-51") y carga el hallazgo
+            val auto = prefs.getBoolean("plano_auto", true)
+            pedirFotoPlano(p, true, listOf(
+                "🗂  Subir varias fotos de la galería\nCada foto con su marca se carga sola" to {
+                    trasVariasFotos = { cargarVarias(it) }
+                    runCatching { elegirVariasFotosPlano.launch("image/*") }.onFailure { trasVariasFotos = null; aviso("No hay galería disponible") }
+                },
+                "⚙  Carga automática: ${if (auto) "ACTIVADA" else "desactivada"}\n" +
+                        (if (auto) "Si se lee tubo y nivel, se guarda sin formulario" else "Siempre abre el formulario para confirmar") to {
+                    prefs.edit().putBoolean("plano_auto", !auto).apply()
+                    aviso("Carga automática " + if (!auto) "activada" else "desactivada")
+                })) { nombre, texto -> cargarFoto(nombre, texto) }
         })
         acciones.addView(accionOscura(R.drawable.ic_editar, "Editar") {
             // Lista de hallazgos para editar (también los que quedan tapados o en el borde del plano) y datos de la pared
@@ -3881,8 +3994,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- PDF del plano ----------
-    // Solo la lámina (plano, leyenda y tabla de hallazgos) en hoja A4 vertical (595 × 842 pt), entera en
-    // una hoja. Si hay tantos hallazgos que quedaría muy chica, va al ancho de la hoja y la tabla sigue en
+    // Primero la lámina (plano, leyenda y tabla de hallazgos) en hoja A4 vertical (595 × 842 pt), entera en
+    // una hoja; después el detalle: una ficha por hallazgo con su foto, dos fichas por hoja. Si hay tantos hallazgos que quedaría muy chica, va al ancho de la hoja y la tabla sigue en
     // la hoja siguiente, cortando entre filas.
 
     private fun nombrePdfPlano(p: Plano) = "Plano ${limpiar(p.titulo)}.pdf"
@@ -3916,6 +4029,7 @@ class MainActivity : AppCompatActivity() {
                 pdf.finishPage(pg)
                 desde = hasta
             }
+            if (p.hallazgos.isNotEmpty()) n = paginasDetallePlano(pdf, p, n, anchoH, altoH, mg)
             val ruta = rutaPlanos(); val nombre = nombrePdfPlano(p)
             val uri = buscarArchivo(ruta, nombre) ?: contentResolver.insert(coleccion, ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
@@ -3925,6 +4039,79 @@ class MainActivity : AppCompatActivity() {
             contentResolver.openOutputStream(uri, "wt")?.use { pdf.writeTo(it) } ?: return null
             return uri
         } finally { pdf.close() }
+    }
+
+    /** Fichas de detalle: código, tipo, ubicación, elevación, nivel, descripción y foto de cada hallazgo. */
+    private fun paginasDetallePlano(pdf: android.graphics.pdf.PdfDocument, p: Plano, n0: Int,
+                                    anchoH: Int, altoH: Int, mg: Float): Int {
+        var n = n0
+        val azul = Color.parseColor("#0E3A5F"); val gris = Color.parseColor("#5D6B78"); val linea = Color.parseColor("#C9D2DC")
+        fun pinta(t: Float, col: Int, neg: Boolean = false) = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = t; color = col; typeface = if (neg) Typeface.DEFAULT_BOLD else Typeface.DEFAULT }
+        val fecha = java.text.SimpleDateFormat("dd-MM-yyyy", Locale.US).format(java.util.Date())
+        val cabH = 46f; val pieH = 20f
+        val altoFicha = (altoH - 2 * mg - cabH - pieH) / 2
+        val total = p.hallazgos.size
+        var i = 0
+        while (i < total) {
+            val pg = pdf.startPage(android.graphics.pdf.PdfDocument.PageInfo.Builder(anchoH, altoH, ++n).create())
+            val c = pg.canvas
+            // Encabezado de la hoja
+            c.drawText("Detalle de hallazgos · ${p.titulo}", mg, mg + 16f, pinta(14f, azul, true))
+            c.drawText(listOf(p.subtitulo, fecha).filter { it.isNotBlank() }.joinToString(" · "), mg, mg + 32f, pinta(9f, gris))
+            c.drawLine(mg, mg + cabH - 6f, anchoH - mg, mg + cabH - 6f, Paint().apply { color = azul; strokeWidth = 1.5f })
+            for (k in 0 until 2) {
+                if (i >= total) break
+                val h = p.hallazgos[i]
+                val t = Planos.tipo(h.tipo)
+                val y0 = mg + cabH + k * altoFicha
+                val x0 = mg; val x1 = anchoH - mg
+                // Barra con código y tipo
+                c.drawRect(x0, y0 + 4f, x1, y0 + 30f, Paint().apply { color = Color.parseColor("#EEF1F5") })
+                Planos.marcador(c, t.forma, x0 + 16f, y0 + 17f, 7f, t.color)
+                c.drawText("${Planos.codigo(i)}  ·  ${t.nombre}", x0 + 30f, y0 + 22f, pinta(13f, Color.BLACK, true))
+                // Datos (columna izquierda)
+                val colW = 170f
+                var y = y0 + 50f
+                fun dato(et: String, v: String) {
+                    c.drawText(et, x0 + 4f, y, pinta(8.5f, gris)); y += 13f
+                    c.drawText(v, x0 + 4f, y, pinta(11.5f, Color.BLACK, true)); y += 20f
+                }
+                dato("Ubicación", if (h.memb) "Membrana entre tubos ${h.tubo} y ${h.tubo + 1}" else "Tubo ${h.tubo}")
+                dato("Código de ubicación", h.ubicacion())
+                dato("Elevación", "${Planos.num(h.elev, 2)} m")
+                if (h.nivel > 0) dato("Nivel", "N${h.nivel}")
+                c.drawText("Descripción", x0 + 4f, y, pinta(8.5f, gris)); y += 5f
+                val desc = h.desc.ifBlank { "—" }
+                val lay = android.text.StaticLayout.Builder.obtain(desc, 0, desc.length, pinta(10.5f, Color.BLACK), (colW - 8f).toInt()).build()
+                c.save(); c.translate(x0 + 4f, y)
+                c.clipRect(0f, 0f, colW, y0 + altoFicha - 12f - y)
+                lay.draw(c); c.restore()
+                // Foto (columna derecha)
+                val fx0 = x0 + colW + 10f; val fy0 = y0 + 38f; val fx1 = x1; val fy1 = y0 + altoFicha - 12f
+                val bmp = h.foto.takeIf { it.isNotBlank() }?.let { buscarArchivo(rutaFotosPlano(), it) }
+                    ?.let { runCatching { cargarBitmap(it, 1400) }.getOrNull() }
+                if (bmp != null) {
+                    val esc = minOf((fx1 - fx0) / bmp.width, (fy1 - fy0) / bmp.height)
+                    val w = bmp.width * esc; val hh = bmp.height * esc
+                    val dx = fx0 + (fx1 - fx0 - w) / 2; val dy = fy0 + (fy1 - fy0 - hh) / 2
+                    c.drawBitmap(bmp, null, RectF(dx, dy, dx + w, dy + hh), Paint(Paint.FILTER_BITMAP_FLAG))
+                    c.drawRect(dx, dy, dx + w, dy + hh, Paint().apply { style = Paint.Style.STROKE; color = linea; strokeWidth = 0.8f })
+                    bmp.recycle()
+                } else {
+                    c.drawRect(fx0, fy0, fx1, fy1, Paint().apply { style = Paint.Style.STROKE; color = linea; strokeWidth = 0.8f })
+                    val pt = pinta(11f, gris).apply { textAlign = Paint.Align.CENTER }
+                    c.drawText("Sin foto", (fx0 + fx1) / 2, (fy0 + fy1) / 2, pt)
+                }
+                if (k == 0 && i + 1 < total)
+                    c.drawLine(x0, y0 + altoFicha - 2f, x1, y0 + altoFicha - 2f, Paint().apply { color = linea; strokeWidth = 0.8f })
+                i++
+            }
+            val pie = pinta(8f, gris).apply { textAlign = Paint.Align.RIGHT }
+            c.drawText("BoilerImage · ${p.titulo} · hoja $n", anchoH - mg, altoH - mg + 4f, pie)
+            pdf.finishPage(pg)
+        }
+        return n
     }
 
     private fun exportarPdfPlano(p: Plano) {
