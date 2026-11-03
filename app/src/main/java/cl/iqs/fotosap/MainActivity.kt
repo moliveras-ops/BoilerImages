@@ -3815,7 +3815,11 @@ class MainActivity : AppCompatActivity() {
                     .onFailure { aviso("No hay app para compartir") }
             }
         })
-        acciones.addView(accionOscura(R.drawable.ic_tabla, "PDF") { exportarPdfPlano(p) })
+        acciones.addView(accionOscura(R.drawable.ic_tabla, "Informe") {
+            menuGrande("Informe de hallazgos", listOf(
+                "📄  PDF\nLámina del plano + ficha con foto de cada hallazgo" to { exportarPdfPlano(p) },
+                "📝  Word (.docx)\nMismo contenido, editable" to { exportarPdfPlano(p, word = true) }))
+        })
         acciones.addView(accionOscura(R.drawable.ic_borrar, "Eliminar", Color.parseColor("#FF8A80")) {
             confirmar("¿Eliminar el plano ${p.titulo}? La imagen ya guardada no se borra.") {
                 lista.remove(p); guardarPlanos(lista); dlg.dismiss(); render()
@@ -4114,25 +4118,72 @@ class MainActivity : AppCompatActivity() {
         return n
     }
 
-    private fun exportarPdfPlano(p: Plano) {
-        val espera = AlertDialog.Builder(this).setMessage("Generando PDF…").setCancelable(false).show()
+    private fun nombreWordPlano(p: Plano) = "Plano ${limpiar(p.titulo)}.docx"
+
+    /** Word con la lámina del plano, la tabla resumen y una ficha por hallazgo con su foto. */
+    private fun generarWordPlano(p: Plano): Uri? {
+        val d = Docx()
+        val fecha = java.text.SimpleDateFormat("dd-MM-yyyy", Locale.US).format(java.util.Date())
+        d.titulo("Plano de ubicación de hallazgos · ${p.titulo}", 16)
+        d.texto(listOf(p.subtitulo, fecha).filter { it.isNotBlank() }.joinToString(" · "), 10, color = "5D6B78")
+        val lam = Planos.imagen(p, 1800)
+        val lb = java.io.ByteArrayOutputStream().also { lam.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        d.imagen(lb, true, lam.width, lam.height, 17.0, 23.0)
+        lam.recycle()
+        d.titulo("Resumen", 13)
+        d.tabla(listOf(listOf("ID", "Tipo", "Ubicación", "Elev. (m)", "Nivel", "Descripción")) +
+            p.hallazgos.mapIndexed { i, h -> listOf(Planos.codigo(i), Planos.tipo(h.tipo).nombre, h.ubicacion(),
+                Planos.num(h.elev, 2), if (h.nivel > 0) "N${h.nivel}" else "", h.desc) },
+            listOf(1.5, 2.8, 2.2, 1.8, 1.4, 7.3))
+        d.texto("T = tubo · M 12–13 = membrana entre los tubos 12 y 13 · N = nivel", 8, color = "5D6B78")
+        p.hallazgos.forEachIndexed { i, h ->
+            d.titulo("${Planos.codigo(i)} · ${Planos.tipo(h.tipo).nombre}", 13, saltoPagina = i % 2 == 0)
+            d.tabla(listOf(
+                listOf("Ubicación", if (h.memb) "Membrana entre tubos ${h.tubo} y ${h.tubo + 1} (${h.ubicacion()})" else "Tubo ${h.tubo} (${h.ubicacion()})"),
+                listOf("Elevación", "${Planos.num(h.elev, 2)} m" + if (h.nivel > 0) " · Nivel ${h.nivel}" else ""),
+                listOf("Descripción", h.desc.ifBlank { "—" })), listOf(3.5, 13.5), encabezado = false, primeraColNegrita = true)
+            val bmp = h.foto.takeIf { it.isNotBlank() }?.let { buscarArchivo(rutaFotosPlano(), it) }
+                ?.let { runCatching { cargarBitmap(it, 1600) }.getOrNull() }
+            if (bmp != null) {
+                val fb = java.io.ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }.toByteArray()
+                d.imagen(fb, false, bmp.width, bmp.height, 15.0, 8.5)
+                bmp.recycle()
+            } else d.texto("Sin foto", 10, color = "5D6B78", centrado = true)
+        }
+        val ruta = rutaPlanos(); val nombre = nombreWordPlano(p)
+        val mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        val uri = buscarArchivo(ruta, nombre) ?: contentResolver.insert(coleccion, ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, ruta)
+        }) ?: return null
+        contentResolver.openOutputStream(uri, "wt")?.use { it.write(d.bytes()) } ?: return null
+        return uri
+    }
+
+    /** Informe del plano en PDF o Word: lámina, resumen y ficha con foto de cada hallazgo. */
+    private fun exportarPdfPlano(p: Plano, word: Boolean = false) {
+        val tipo = if (word) "Word" else "PDF"
+        val mime = if (word) "application/vnd.openxmlformats-officedocument.wordprocessingml.document" else "application/pdf"
+        val espera = AlertDialog.Builder(this).setMessage("Generando $tipo…").setCancelable(false).show()
         Thread {
-            val res = runCatching { generarPdfPlano(p) }
+            val res = runCatching { if (word) generarWordPlano(p) else generarPdfPlano(p) }
             runOnUiThread {
                 espera.dismiss()
                 val uri = res.getOrNull()
-                if (uri == null) { aviso("No se pudo generar el PDF" + (res.exceptionOrNull()?.message?.let { ": $it" } ?: "")); return@runOnUiThread }
-                mostrar(AlertDialog.Builder(this).setTitle("PDF listo")
-                    .setMessage("${rutaPlanos()}${nombrePdfPlano(p)}")
+                if (uri == null) { aviso("No se pudo generar el $tipo" + (res.exceptionOrNull()?.message?.let { ": $it" } ?: "")); return@runOnUiThread }
+                mostrar(AlertDialog.Builder(this).setTitle("$tipo listo")
+                    .setMessage("${rutaPlanos()}${if (word) nombreWordPlano(p) else nombrePdfPlano(p)}\n\n" +
+                            "Lámina del plano + ficha con foto de cada hallazgo (${p.hallazgos.size}).")
                     .setPositiveButton("Abrir") { _, _ ->
-                        val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/pdf")
+                        val i = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
                             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        runCatching { startActivity(i) }.onFailure { aviso("No hay app para abrir PDF") }
+                        runCatching { startActivity(i) }.onFailure { aviso("No hay app para abrir $tipo") }
                     }
                     .setNeutralButton("Compartir") { _, _ ->
-                        val i = Intent(Intent.ACTION_SEND).setType("application/pdf")
+                        val i = Intent(Intent.ACTION_SEND).setType(mime)
                             .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        runCatching { startActivity(Intent.createChooser(i, "Compartir PDF")) }
+                        runCatching { startActivity(Intent.createChooser(i, "Compartir $tipo")) }
                             .onFailure { aviso("No hay app para compartir") }
                     }
                     .setNegativeButton("Cerrar", null).create())
