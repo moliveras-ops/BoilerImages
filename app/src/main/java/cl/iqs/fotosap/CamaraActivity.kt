@@ -93,6 +93,9 @@ import java.util.concurrent.TimeUnit
  *  - Pendientes: "faltan X de N" en la pared y botón ⏭ para saltar a la siguiente sin completar.
  *  - ★ junto a la miniatura: marca la última foto "para informe" (archivo Para informe.txt de la carpeta).
  *  - Resolución Normal (12 MP) o Máxima; modos HDR / Noche si el teléfono los ofrece.
+ *  - Revisión de calidad tras cada foto: avisa si quedó borrosa, oscura o quemada; tocar el aviso la elimina para repetir.
+ *  - Sello (opcional): copia "<foto>_marcada.jpg" con código, pared, tipo, evento y fecha en una franja; la original no se toca.
+ *  - Tocar el título abre la lista de todas las singularidades del recorrido para saltar a cualquiera.
  *
  * Extras de entrada: "rutas", "codigos" (ej. AP01), "titulos" (ej. AP01 · Pared Frontal),
  * "indice" y "modo" (general | detalle). Devuelve "indice" (última singularidad) y "fotos".
@@ -160,6 +163,10 @@ class CamaraActivity : AppCompatActivity() {
     private var optGrilla = true
     private var optNivel = true
     private var optMacro = true
+    private var optRevisar = true
+    private var optSello = false
+    private var avisoCalidad = false          // el aviso flotante muestra "foto borrosa/oscura" (tocar = eliminar)
+    private var uriCalidad: Uri? = null
     private lateinit var btnOpciones: TextView
     private lateinit var barraArriba: View
     private lateinit var guia: Guia
@@ -231,6 +238,8 @@ class CamaraActivity : AppCompatActivity() {
         optGrilla = prefs.getBoolean("cam_grilla", true)
         optNivel = prefs.getBoolean("cam_nivel", true)
         optMacro = prefs.getBoolean("cam_macro", true)
+        optRevisar = prefs.getBoolean("cam_revisar", true)
+        optSello = prefs.getBoolean("cam_sello", false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.statusBarColor = oscuro
         window.navigationBarColor = oscuro
@@ -355,7 +364,7 @@ class CamaraActivity : AppCompatActivity() {
             textSize = 14f; typeface = medio; setTextColor(tinta); gravity = Gravity.CENTER; visibility = View.GONE
             background = GradientDrawable().apply { cornerRadius = dp(20).toFloat(); setColor(acento) }
             setPadding(dp(16), dp(8), dp(16), dp(8))
-            setOnClickListener { if (bloqueado) desbloquear(true) else if (macroAuto) salirMacro(true) }
+            setOnClickListener { if (avisoCalidad) repetirMala() else if (bloqueado) desbloquear(true) else if (macroAuto) salirMacro(true) }
         }
         raiz.addView(txtAviso, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_HORIZONTAL))
 
@@ -375,6 +384,9 @@ class CamaraActivity : AppCompatActivity() {
         }
         txtConteo = TextView(this).apply { textSize = 12f; setTextColor(Color.parseColor("#C9D3DD")); maxLines = 1 }
         textos.addView(txtTitulo); textos.addView(txtConteo)
+        textos.isClickable = true
+        textos.setOnClickListener { elegirSingularidad() }
+        textos.contentDescription = "Elegir singularidad"
         fila1.addView(textos, LinearLayout.LayoutParams(0, -2, 1f))
         btnRes = chipChico { cambiarResolucion() }
         btnExt = chipChico { cambiarExtension() }
@@ -1034,15 +1046,18 @@ class CamaraActivity : AppCompatActivity() {
 
     private fun menuOpciones() {
         val nombres = arrayOf("Disparo estabilizado (espera a que esté quieto)", "Flash al disparar",
-            "Cuadrícula", "Nivel (horizonte)", "Macro automática (0,6× al acercarse)")
-        val marcas = booleanArrayOf(optEstab, optFlash, optGrilla, optNivel, optMacro)
+            "Cuadrícula", "Nivel (horizonte)", "Macro automática (0,6× al acercarse)",
+            "Avisar si la foto sale borrosa u oscura", "Sello con código, pared y fecha (copia aparte)")
+        val marcas = booleanArrayOf(optEstab, optFlash, optGrilla, optNivel, optMacro, optRevisar, optSello)
         AlertDialog.Builder(this).setTitle("Opciones de cámara")
             .setMultiChoiceItems(nombres, marcas) { _, i, v -> marcas[i] = v }
             .setPositiveButton("Listo") { _, _ ->
                 val flashAntes = optFlash
                 optEstab = marcas[0]; optFlash = marcas[1]; optGrilla = marcas[2]; optNivel = marcas[3]; optMacro = marcas[4]
+                optRevisar = marcas[5]; optSello = marcas[6]
                 prefs.edit().putBoolean("cam_estab", optEstab).putBoolean("cam_flash", optFlash)
-                    .putBoolean("cam_grilla", optGrilla).putBoolean("cam_nivel", optNivel).putBoolean("cam_macro", optMacro).apply()
+                    .putBoolean("cam_grilla", optGrilla).putBoolean("cam_nivel", optNivel).putBoolean("cam_macro", optMacro)
+                    .putBoolean("cam_revisar", optRevisar).putBoolean("cam_sello", optSello).apply()
                 if (optFlash != flashAntes) captura?.flashMode = if (optFlash) ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF
                 if (optFlash && linterna) aviso("Con la linterna encendida el flash no se usa")
                 if (!optMacro && macroAuto) salirMacro(false)
@@ -1054,14 +1069,14 @@ class CamaraActivity : AppCompatActivity() {
 
     /** Configuración recomendada para el interior de la caldera. */
     private fun configuracionRecomendada() {
-        optEstab = true; optFlash = false; optGrilla = true; optNivel = true; optMacro = true
+        optEstab = true; optFlash = false; optGrilla = true; optNivel = true; optMacro = true; optRevisar = true
         linterna = true; extActual = ExtensionMode.NONE
         enfoqueManual = false
         if (bloqueado) desbloquear(false)
         if (macroAuto) salirMacro(false)
         brilloRecomendado = true
         prefs.edit().putBoolean("cam_estab", true).putBoolean("cam_flash", false).putBoolean("cam_grilla", true)
-            .putBoolean("cam_nivel", true).putBoolean("cam_macro", true).putBoolean("cam_linterna", true)
+            .putBoolean("cam_nivel", true).putBoolean("cam_macro", true).putBoolean("cam_linterna", true).putBoolean("cam_revisar", true)
             .putString("cam_res", "normal").putInt("cam_ext", ExtensionMode.NONE).apply()
         lentesArmados = ""
         vincular()
@@ -1234,6 +1249,7 @@ class CamaraActivity : AppCompatActivity() {
     private fun disparar() {
         if (captura == null || ocupado) return
         ocupado = true
+        if (avisoCalidad) { avisoCalidad = false; uriCalidad = null; manejador.removeCallbacks(ocultarMala); restaurarAviso() }
         if (!optEstab || giro == null) { capturar(); return }
         val inicio = SystemClock.uptimeMillis()
         var avisado = false
@@ -1277,11 +1293,20 @@ class CamaraActivity : AppCompatActivity() {
                 recontar()
                 ultimaUri = r.savedUri; ultimoNombre = nombre; ultimaRuta = ruta; ultimaEstrella = false
                 refrescar()
-                aviso("${codigos[indice]} · ${if (modo == "general") "General" else "Detalle"} $k")
+                val etiqueta = "${if (modo == "general") "General" else "Detalle"} $k"
+                aviso("${codigos[indice]} · $etiqueta")
                 val u = r.savedUri ?: return
+                val titulo = titulos[indice]
+                val revisar = optRevisar; val sellar = optSello
                 Thread {
                     val b = runCatching { contentResolver.loadThumbnail(u, Size(200, 200), null) }.getOrNull()
                     if (b != null) runOnUiThread { miniatura.setImageBitmap(b) }
+                    val problema = if (revisar) runCatching { Calidad.revisar(contentResolver, u) }.getOrNull() else null
+                    if (problema != null) runOnUiThread { mostrarMala(u, problema) }
+                    if (sellar) {
+                        val ok = runCatching { Calidad.sellar(contentResolver, coleccion, u, ruta, nombre, titulo, etiqueta) }.getOrDefault(false)
+                        if (!ok) runOnUiThread { aviso("No se pudo crear la copia con sello") }
+                    }
                 }.start()
             }
             override fun onError(e: ImageCaptureException) {
@@ -1313,6 +1338,60 @@ class CamaraActivity : AppCompatActivity() {
             })
     }
 
+    // ---------- Calidad y lista de singularidades ----------
+
+    private val ocultarMala = Runnable { if (avisoCalidad) { avisoCalidad = false; uriCalidad = null; restaurarAviso() } }
+
+    /** Aviso ámbar sobre la imagen: "foto borrosa · tocar para eliminar y repetir" (6 s). */
+    private fun mostrarMala(u: Uri, problema: String) {
+        if (u != ultimaUri || isFinishing) return
+        avisoCalidad = true; uriCalidad = u
+        vista.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        mostrarAviso("⚠ $problema · tocar aquí para eliminarla y repetir")
+        manejador.removeCallbacks(ocultarMala)
+        manejador.postDelayed(ocultarMala, 6000)
+    }
+
+    private fun restaurarAviso() {
+        when {
+            bloqueado -> mostrarAviso("🔒 AE/AF bloqueado · tocar aquí para soltar")
+            macroAuto -> mostrarAviso("Macro 0,6× · tocar aquí para volver a 1×")
+            else -> txtAviso.visibility = View.GONE
+        }
+    }
+
+    /** Elimina la foto señalada por el aviso de calidad (y su copia con sello) para volver a tomarla. */
+    private fun repetirMala() {
+        val u = uriCalidad
+        avisoCalidad = false; uriCalidad = null
+        manejador.removeCallbacks(ocultarMala)
+        restaurarAviso()
+        if (u == null || u != ultimaUri) return
+        if (runCatching { contentResolver.delete(u, null, null) > 0 }.getOrDefault(false)) {
+            Calidad.borrarSello(contentResolver, coleccion, ultimaRuta, ultimoNombre)
+            Informe.quitar(contentResolver, ultimaRuta, ultimoNombre)
+            fotosTomadas = maxOf(0, fotosTomadas - 1)
+            recontar()
+            ultimaUri = null; ultimoNombre = ""; ultimaEstrella = false
+            miniatura.setImageDrawable(null)
+            aviso("Foto eliminada · dispara de nuevo"); refrescar()
+        } else aviso("No se pudo eliminar")
+    }
+
+    /** Lista de todas las singularidades del recorrido (○ sin fotos, ◐ incompleta, ● completa). */
+    private fun elegirSingularidad() {
+        if (destino != null || rutas.size < 2) return
+        val items = rutas.indices.map { i ->
+            (when (estadoDe(i)) { 0 -> "○  "; 1 -> "◐  "; else -> "●  " }) + titulos[i]
+        }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("Ir a singularidad")
+            .setSingleChoiceItems(items, indice) { d, j ->
+                d.dismiss()
+                if (j != indice) { indice = j; refrescar(); aviso(titulos[j]) }
+            }
+            .setNegativeButton("Cancelar", null).show()
+    }
+
     /** Ver la última foto en grande, con opción de eliminarla. */
     private fun revisarUltima() {
         val u = ultimaUri ?: return
@@ -1332,7 +1411,9 @@ class CamaraActivity : AppCompatActivity() {
                 if (runCatching { contentResolver.delete(u, null, null) > 0 }.getOrDefault(false)) {
                     fotosTomadas = maxOf(0, fotosTomadas - 1)
                     recontar()
+                    Calidad.borrarSello(contentResolver, coleccion, ultimaRuta, ultimoNombre)
                     Informe.quitar(contentResolver, ultimaRuta, ultimoNombre)
+                    if (avisoCalidad) { avisoCalidad = false; uriCalidad = null; restaurarAviso() }
                     ultimaUri = null; ultimoNombre = ""; ultimaEstrella = false
                     miniatura.setImageDrawable(null)
                     aviso("Foto eliminada"); refrescar()
