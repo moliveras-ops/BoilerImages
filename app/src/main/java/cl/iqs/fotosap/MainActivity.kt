@@ -234,6 +234,11 @@ class MainActivity : AppCompatActivity() {
             else { trasFotoPlano = null; uri?.let { runCatching { contentResolver.delete(it, null, null) } } }
             return
         }
+        if (modo == "croquis") {
+            val luego = trasImagenCroquis; trasImagenCroquis = null
+            if (ok && uri != null && luego != null) luego(uri) else uri?.let { runCatching { contentResolver.delete(it, null, null) } }
+            return
+        }
         if (modo == "nombre") {
             if (ok && uri != null) leerNombreDe(uri, true) else uri?.let { runCatching { contentResolver.delete(it, null, null) } }
             return
@@ -585,6 +590,7 @@ class MainActivity : AppCompatActivity() {
         val p = t.paredes[pi]
         title = "${t.prefijo} — ${p.nombre}"
         val col = columna()
+        botonCroquis { grupoPared(ti, pi) }?.let { col.addView(it) }
         col.addView(leyenda())
 
         val conteo = contarFotos()
@@ -736,7 +742,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { 0 }
         guardarEventos(eventosGuardados().filter { it != nombre })
         prefs.edit().remove("terreno_$nombre").remove("med_$nombre").remove("tipos_$nombre").remove("caldera_$nombre")
-            .remove("insp_$nombre").remove("cond_$nombre").remove("tipoEv_$nombre").remove("planos_$nombre").apply()
+            .remove("insp_$nombre").remove("cond_$nombre").remove("tipoEv_$nombre").remove("planos_$nombre").remove("croquis_$nombre").apply()
         val quedan = resumenEventos()[nombre]?.first ?: 0
         if (quedan > 0)
             aviso("Se borraron $borradas fotos. Quedan $quedan que la app no puede borrar: elimínalas desde Mis archivos.")
@@ -1130,6 +1136,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(espacio(8))
         col.addView(texto("Carpetas (${nodo.hijos.size})", 14f, true))
         if (nodo.hijos.isEmpty()) col.addView(texto("Aún no hay carpetas. Genera una serie numerada o agrega una con nombre.", 13f))
+        else botonCroquis { grupoNodo(ii, r) }?.let { col.addView(it) }
         nodo.hijos.forEachIndexed { i, h ->
             if (h.hijos.isEmpty()) return@forEachIndexed
             val rh = r + i
@@ -3018,6 +3025,7 @@ class MainActivity : AppCompatActivity() {
         if (!nombre.endsWith(".jpg", true) && !nombre.endsWith(".png", true)) return true
         if (nombre in estrellasZip.getOrPut(ruta) { Informe.leer(contentResolver, ruta) }) return true
         if (nombre.contains("_general") || nombre.contains("_marcada")) return true
+        if (ruta.endsWith("/Croquis/") && nombre.startsWith("Imagen ")) return false   // queda la lámina
         if (ruta.contains("/Espesores/") || ruta.contains("/Originales/")) return false
         if (nombre.contains("_detalle") || nombre.startsWith("Registro_")) return false
         return true
@@ -4267,6 +4275,527 @@ class MainActivity : AppCompatActivity() {
         override fun performClick(): Boolean = super.performClick()
     }
 
+    // ---------- Croquis ----------
+    // Imagen de referencia de una pared (o de una carpeta de una inspección por árbol), por ejemplo la
+    // lámina del plan de inspección, con un marcador por singularidad. El marcador muestra una etiqueta
+    // (ej. el número del deshollinador) y el color del avance; tocarlo abre las fotos y la nota.
+    // Prefs "croquis_<evento>" (va en el respaldo): { <carpeta del grupo>: {"i": imagen, "p": [{"r": carpeta
+    // del elemento, "x", "y" (0–1), "t": etiqueta}]} }. Las imágenes quedan en <evento>/Croquis/.
+
+    private class PuntoCroquis(var r: String, var x: Float, var y: Float, var t: String)
+    private class Croquis(var img: String, val pts: MutableList<PuntoCroquis> = mutableListOf())
+    /** Pared o carpeta con croquis: [id] = su carpeta; [claves] = elementos que se pueden ubicar. */
+    private class GrupoCroquis(val id: String, val titulo: String, val claves: List<String>,
+                               val pared: Pair<Int, Int>? = null, val nodo: Pair<Int, List<Int>>? = null)
+    private class MarcaC(val x: Float, val y: Float, val t: String, val sub: String, val est: Int,
+                         val crit: Boolean, val ok: Boolean)
+
+    private fun rutaCroquis() = "$raiz/$evento/Croquis/"
+    private fun croquisJson(): JSONObject =
+        runCatching { JSONObject(prefs.getString("croquis_$evento", null) ?: "{}") }.getOrDefault(JSONObject())
+
+    private fun croquisDe(id: String): Croquis? {
+        val o = croquisJson().optJSONObject(id) ?: return null
+        val c = Croquis(o.optString("i"))
+        val a = o.optJSONArray("p") ?: JSONArray()
+        for (k in 0 until a.length()) a.optJSONObject(k)?.let {
+            c.pts.add(PuntoCroquis(it.optString("r"), it.optDouble("x", 0.5).toFloat(), it.optDouble("y", 0.5).toFloat(), it.optString("t")))
+        }
+        return c
+    }
+
+    private fun guardarCroquis(id: String, c: Croquis?) {
+        val o = croquisJson()
+        if (c == null) o.remove(id) else o.put(id, JSONObject().put("i", c.img).put("p", JSONArray().apply {
+            c.pts.forEach { put(JSONObject().put("r", it.r).put("x", it.x.toDouble()).put("y", it.y.toDouble()).put("t", it.t)) }
+        }))
+        prefs.edit().putString("croquis_$evento", o.toString()).apply()
+    }
+
+    private fun grupoPared(ti: Int, pi: Int): GrupoCroquis? {
+        val t = tipos.getOrNull(ti) ?: return null
+        val p = t.paredes.getOrNull(pi) ?: return null
+        return GrupoCroquis("$raiz/$evento/${t.nombre}/${p.nombre}/", "${t.prefijo} — ${p.nombre}",
+            (1..p.cantidad).map { claveSing(ti, pi, it) }, pared = ti to pi)
+    }
+
+    private fun grupoNodo(ii: Int, r: List<Int>): GrupoCroquis? {
+        val n = nodoEn(ii, r) ?: return null
+        return GrupoCroquis(carpetaNodo(ii, r), n.nombre, n.hijos.indices.map { claveNodo(ii, r + it) }, nodo = ii to r)
+    }
+
+    /** Botón de la pantalla de la pared / carpeta: abre el croquis o pide la imagen si aún no hay. */
+    private fun botonCroquis(constr: () -> GrupoCroquis?): View? {
+        val g = constr() ?: return null
+        val c = croquisDe(g.id)
+        val rutas = g.claves.mapNotNull { destDe(it)?.ruta }.toSet()
+        val ub = c?.pts?.map { it.r }?.filter { it in rutas }?.toSet()?.size ?: 0
+        return boton(if (c == null) "🗺  Croquis: cargar imagen de referencia" else "🗺  Ver croquis ($ub de ${rutas.size} ubicadas)",
+                     if (c == null) Estilo.SECUNDARIO else Estilo.PRIMARIO) { abrirCroquis(constr) }
+    }
+
+    private var trasImagenCroquis: ((Uri) -> Unit)? = null
+    private val elegirImagenCroquis = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val luego = trasImagenCroquis; trasImagenCroquis = null
+        if (uri != null && luego != null) luego(uri)
+    }
+
+    private fun pedirImagenCroquis(g: GrupoCroquis, luego: () -> Unit) {
+        menuGrande("Imagen del croquis — ${g.titulo}", listOf<Pair<String, () -> Unit>>(
+            "🖼  Elegir imagen de la galería\nEj. captura de la lámina del plan de inspección (recórtala al croquis)" to {
+                trasImagenCroquis = { u -> guardarImagenCroquis(g, u, false, luego) }
+                runCatching { elegirImagenCroquis.launch("image/*") }.onFailure { trasImagenCroquis = null; aviso("No hay galería disponible") }
+            },
+            "📷  Tomar foto\nCroquis en papel, pizarra o pantalla" to {
+                val u = crearImagen(rutaCroquis(), "Foto croquis ${selloHora()}.jpg")
+                if (u == null) aviso("No se pudo crear el archivo")
+                else { trasImagenCroquis = { x -> guardarImagenCroquis(g, x, true, luego) }; lanzarCamara(u, "croquis") }
+            }))
+    }
+
+    private fun selloHora() = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+
+    /** Copia la imagen elegida a <evento>/Croquis/ (JPG, máx. 3000 px) y la deja como imagen del croquis. */
+    private fun guardarImagenCroquis(g: GrupoCroquis, src: Uri, temporal: Boolean, luego: () -> Unit) {
+        val espera = AlertDialog.Builder(this).setMessage("Guardando imagen…").setCancelable(false).show()
+        val nombre = "Imagen ${limpiar(g.titulo)} ${selloHora()}.jpg"
+        Thread {
+            val ok = runCatching {
+                val bmp = cargarBitmap(src, 3000)
+                val u = crearImagen(rutaCroquis(), nombre) ?: error("sin archivo")
+                contentResolver.openOutputStream(u)!!.use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                bmp.recycle()
+            }.isSuccess
+            if (temporal) runCatching { contentResolver.delete(src, null, null) }
+            runOnUiThread {
+                runCatching { espera.dismiss() }
+                if (!ok) { aviso("No se pudo guardar la imagen"); return@runOnUiThread }
+                val c = croquisDe(g.id)
+                if (c == null) guardarCroquis(g.id, Croquis(nombre))
+                else {
+                    buscarArchivo(rutaCroquis(), c.img)?.let { runCatching { contentResolver.delete(it, null, null) } }
+                    c.img = nombre; guardarCroquis(g.id, c)
+                    if (c.pts.isNotEmpty()) aviso("Imagen cambiada: revisa la ubicación de los marcadores o usa \"Leer Nº\"")
+                }
+                luego()
+            }
+        }.start()
+    }
+
+    /** Números (y códigos cortos como DH34) leídos en el croquis, en orden de lectura: filas de arriba hacia abajo. */
+    private fun numerosCroquis(r: com.google.mlkit.vision.text.Text, w: Int, h: Int): List<Triple<String, Float, Float>> {
+        val patron = Regex("^[A-Za-z]{0,4}[-_]?\\d{1,4}[A-Za-z]?$")
+        val l = mutableListOf<Triple<String, Float, Float>>()
+        for (b in r.textBlocks) for (ln in b.lines) for (e in ln.elements) {
+            val t = e.text.trim().trim('.', ',', ':', ';', '|', '[', ']', '(', ')', '!', '\'', '"')
+            val box = e.boundingBox ?: continue
+            if (!patron.matches(t) || t.none { it.isDigit() }) continue
+            val x = box.exactCenterX() / w; val y = box.exactCenterY() / h
+            if (l.any { it.first == t && Math.abs(it.second - x) < 0.02f && Math.abs(it.third - y) < 0.02f }) continue
+            l.add(Triple(t, x, y))
+        }
+        val filas = mutableListOf<MutableList<Triple<String, Float, Float>>>()
+        for (p in l.sortedBy { it.third }) {
+            val f = filas.lastOrNull()
+            if (f != null && p.third - f.first().third < 0.015f) f.add(p) else filas.add(mutableListOf(p))
+        }
+        return filas.flatMap { f -> f.sortedBy { it.second } }
+    }
+
+    private fun abrirCroquis(constr: () -> GrupoCroquis?) {
+        val g0 = constr() ?: return
+        if (croquisDe(g0.id) == null) { pedirImagenCroquis(g0) { abrirCroquis(constr) }; return }
+        var g = g0
+        var c = croquisDe(g.id)!!
+        var editar = c.pts.isEmpty()
+        var mover = -1
+        val elem = if (g.nodo != null) "carpeta" else "singularidad"
+        val dlg = dialogoPantallaCompleta()
+        val tituloTv = TextView(this)
+        val raizV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.oscuro) }
+        raizV.addView(barraOscura(tituloTv) { dlg.dismiss() })
+        val vista = VistaCroquis()
+        raizV.addView(vista, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val ayuda = TextView(this).apply { textSize = 13.5f; setTextColor(Color.parseColor("#C9D3DE")); setPadding(dp(12), dp(6), dp(12), dp(4)) }
+        raizV.addView(ayuda)
+        val acciones = filaOscura()
+        raizV.addView(acciones)
+        dlg.setContentView(raizV)
+        dlg.setOnDismissListener { render() }
+
+        var destDeRuta = mapOf<String, Dest>()
+        val fondoBoton = Color.parseColor("#1C2A3A")
+        lateinit var refrescar: () -> Unit
+
+        fun cargarImagen() {
+            vista.poner(null)
+            val u = buscarArchivo(rutaCroquis(), c.img) ?: run { aviso("No se encontró la imagen del croquis (${c.img})"); return }
+            Thread {
+                val b = runCatching { cargarBitmap(u, 2400) }.getOrNull()
+                runOnUiThread { if (b == null) aviso("No se pudo abrir la imagen") else vista.poner(b) }
+            }.start()
+        }
+
+        fun guardarC() { guardarCroquis(g.id, c); refrescar() }
+
+        fun elegirElem(titulo: String, f: (Dest) -> Unit) {
+            val dests = g.claves.mapNotNull { destDe(it) }
+            if (dests.isEmpty()) { aviso(if (g.nodo != null) "Esta carpeta no tiene subcarpetas" else "La pared no tiene singularidades"); return }
+            val ubic = c.pts.map { it.r }.toSet()
+            val orden = dests.filter { it.ruta !in ubic } + dests.filter { it.ruta in ubic }
+            menuGrande(titulo, orden.map { d -> (d.corto + if (d.ruta in ubic) "   (ya ubicada: se mueve aquí)" else "") to { f(d) } })
+        }
+
+        fun menuMarcador(pt: PuntoCroquis) {
+            val d = destDeRuta[pt.r]
+            menuGrande("Marcador ${pt.t}" + (d?.let { if (it.corto != pt.t) " · ${it.corto}" else "" } ?: " (sin vincular)"), listOfNotNull<Pair<String, () -> Unit>>(
+                d?.let { "📷  Fotos y nota de ${it.corto}" to { menuElemento(it.clave) } },
+                "✏️  Cambiar etiqueta (${pt.t})\nEj. número del deshollinador" to {
+                    dialogoTexto("Etiqueta del marcador", pt.t) { pt.t = it.take(12); guardarC() }
+                },
+                "📍  ${if (d == null) "Vincular a una" else "Cambiar"} $elem" to {
+                    elegirElem("¿Qué $elem es ${pt.t}?") { nd -> c.pts.removeAll { it !== pt && it.r == nd.ruta }; pt.r = nd.ruta; guardarC() }
+                },
+                "✋  Mover (toca después el nuevo lugar)" to { mover = c.pts.indexOf(pt); refrescar() },
+                "🗑  Quitar marcador" to { c.pts.remove(pt); guardarC() }))
+        }
+
+        /** Pone los marcadores leídos: [pares] = (lectura, carpeta del elemento o "" sin vincular). Reemplaza los actuales. */
+        fun ponerLeidos(pares: List<Pair<Triple<String, Float, Float>, String>>) {
+            c.pts.clear()
+            pares.forEach { (t, r) -> c.pts.add(PuntoCroquis(r, t.second, t.third, t.first)) }
+            editar = true; mover = -1
+            guardarC()
+            val sin = pares.count { it.second.isEmpty() }
+            aviso("${pares.size} marcador(es)" + (if (sin > 0) " · $sin sin vincular (gris): tócalos para asignarlos" else "") +
+                  ". Revisa y toca Listo.")
+        }
+
+        fun digitos(s: String) = s.filter { it.isDigit() }.trimStart('0').ifEmpty { if (s.any { it.isDigit() }) "0" else "" }
+
+        fun vincularNodo(l: List<Triple<String, Float, Float>>): List<Pair<Triple<String, Float, Float>, String>> {
+            val dests = g.claves.mapNotNull { destDe(it) }
+            val usados = mutableSetOf<String>()
+            return l.map { t ->
+                val d = dests.firstOrNull { it.ruta !in usados && (it.corto.equals(t.first, true) ||
+                    (digitos(it.corto).isNotEmpty() && digitos(it.corto) == digitos(t.first))) }
+                d?.let { usados.add(it.ruta) }
+                t to (d?.ruta ?: "")
+            }
+        }
+
+        fun proponer(l: List<Triple<String, Float, Float>>) {
+            if (l.isEmpty()) { aviso("No se encontraron números. Toca Editar y ubica los marcadores tocando la imagen."); return }
+            val muestra = l.take(8).joinToString(", ") { it.first } + if (l.size > 8) "…" else ""
+            val reemplaza = if (c.pts.isNotEmpty()) "\nReemplaza los ${c.pts.size} marcadores actuales" else ""
+            val ops = mutableListOf<Pair<String, () -> Unit>>()
+            g.pared?.let { (ti, pi) ->
+                val t = tipos.getOrNull(ti); val p = t?.paredes?.getOrNull(pi)
+                if (t != null && p != null) {
+                    val ej = l.take(3).mapIndexed { k, x -> "%s%02d = %s".format(t.prefijo, k + 1, x.first) }.joinToString(", ")
+                    val cambia = if (l.size > p.cantidad && l.size <= 300) "\nLa pared pasa de ${p.cantidad} a ${l.size} singularidades" else
+                                 if (l.size < p.cantidad) "\nQuedan ${p.cantidad - l.size} singularidades sin ubicar" else ""
+                    ops.add("📍  Asignar en orden de lectura (de arriba hacia abajo)\n$ej…$cambia$reemplaza" to {
+                        if (l.size > p.cantidad && l.size <= 300) { p.cantidad = l.size; guardar() }
+                        constr()?.let { g = it }
+                        val ds = g.claves.mapNotNull { destDe(it) }
+                        ponerLeidos(l.mapIndexed { k, x -> x to (ds.getOrNull(k)?.ruta ?: "") })
+                    })
+                }
+            }
+            g.nodo?.let { (ii, r) ->
+                val pares = vincularNodo(l)
+                val coinciden = pares.count { it.second.isNotEmpty() }
+                val faltan = l.size - coinciden
+                if (coinciden > 0) ops.add("📍  Vincular con las carpetas del mismo número\n$coinciden de ${l.size} coinciden$reemplaza" to { ponerLeidos(pares) })
+                if (faltan > 0) ops.add("＋  Crear las $faltan carpeta(s) que faltan y vincular\nUna carpeta por número leído (ej. DH34)$reemplaza" to {
+                    val previo = g.claves.firstNotNullOfOrNull { destDe(it)?.corto?.takeWhile { ch -> ch.isLetter() }?.takeIf { s -> s.isNotEmpty() } } ?: "DH"
+                    dialogoTexto("Prefijo del código (DH → DH34)", previo) { pre0 ->
+                        val nodo = nodoEn(ii, r) ?: return@dialogoTexto
+                        val pre = codigoLimpio(pre0).takeIf { it != "X" } ?: ""
+                        pares.filter { it.second.isEmpty() }.forEach { (t, _) ->
+                            val cod = codigoLimpio(if (t.first.first().isDigit()) pre + t.first else t.first)
+                            if (nodo.hijos.none { it.codigo.equals(cod, true) }) nodo.hijos.add(Nodo(cod, cod))
+                        }
+                        guardarInsp()
+                        constr()?.let { g = it }
+                        ponerLeidos(vincularNodo(l))
+                    }
+                })
+            }
+            ops.add("📌  Solo poner los marcadores\nLos vinculas después tocando cada uno$reemplaza" to {
+                ponerLeidos(l.map { it to "" })
+            })
+            menuGrande("${l.size} números leídos: $muestra", ops)
+        }
+
+        fun leerNumeros() {
+            val u = buscarArchivo(rutaCroquis(), c.img) ?: run { aviso("No se encontró la imagen"); return }
+            val b0 = runCatching { cargarBitmap(u, 2400) }.getOrNull() ?: run { aviso("No se pudo abrir la imagen"); return }
+            // imágenes chicas se amplían: el lector reconoce mejor números de pocos píxeles
+            val b = if (maxOf(b0.width, b0.height) < 1600) Bitmap.createScaledBitmap(b0, b0.width * 2, b0.height * 2, true) else b0
+            val espera = AlertDialog.Builder(this).setMessage("Buscando números en el croquis…").setCancelable(false).show()
+            TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).process(InputImage.fromBitmap(b, 0))
+                .addOnSuccessListener { r -> runCatching { espera.dismiss() }; proponer(numerosCroquis(r, b.width, b.height)) }
+                .addOnFailureListener { runCatching { espera.dismiss() }; aviso("No se pudo leer la imagen") }
+        }
+
+        refrescar = {
+            constr()?.let { g = it }
+            val dests = g.claves.mapNotNull { destDe(it) }
+            destDeRuta = dests.associateBy { it.ruta }
+            val conteo = contarFotos(); val cs = conds()
+            vista.marcas = c.pts.map { pt ->
+                val d = destDeRuta[pt.r]
+                MarcaC(pt.x, pt.y, pt.t.ifBlank { d?.corto ?: "?" }, if (d != null && d.corto != pt.t) d.corto else "",
+                       estado(conteo[pt.r]), cs.optString(pt.r) == "crit", d != null)
+            }
+            vista.sel = mover
+            val ubic = c.pts.map { it.r }.filter { it in destDeRuta }.toSet().size
+            val compl = dests.count { estado(conteo[it.ruta]) == 2 }
+            tituloTv.text = "Croquis — ${g.titulo}\n$ubic de ${dests.size} ubicadas · $compl completas"
+            ayuda.text = when {
+                mover >= 0 -> "Toca el nuevo lugar del marcador ${c.pts.getOrNull(mover)?.t ?: ""}"
+                editar -> "EDITANDO · Toca un lugar vacío para ubicar una $elem; toca un marcador para cambiarlo. " +
+                          "\"Leer Nº\" pone los marcadores solos."
+                else -> "Toca un marcador para fotos y nota · pellizca o doble toque para acercar. " +
+                        "Blanco sin fotos · naranjo incompleta · verde completa."
+            }
+            acciones.removeAllViews()
+            acciones.addView(accionOscura(if (editar) R.drawable.ic_listo else R.drawable.ic_editar, if (editar) "Listo" else "Editar",
+                if (editar) C.oscuro else Color.WHITE, if (editar) C.acento else fondoBoton) { editar = !editar; mover = -1; refrescar() })
+            acciones.addView(accionOscura(R.drawable.ic_texto, "Leer Nº") { leerNumeros() })
+            acciones.addView(accionOscura(R.drawable.ic_imagen, "Imagen") {
+                pedirImagenCroquis(g) { croquisDe(g.id)?.let { c = it }; cargarImagen(); refrescar() }
+            })
+            acciones.addView(accionOscura(R.drawable.ic_compartir, "Lámina") { laminaCroquis(g, c, vista.marcas) })
+        }
+
+        vista.alTocar = { x, y, i ->
+            val pt = c.pts.getOrNull(i)
+            when {
+                mover >= 0 -> { c.pts.getOrNull(mover)?.let { it.x = x; it.y = y }; mover = -1; guardarC() }
+                pt != null && !editar -> {
+                    val d = destDeRuta[pt.r]
+                    if (d == null) menuMarcador(pt) else menuElemento(d.clave)
+                }
+                pt != null -> menuMarcador(pt)
+                editar -> elegirElem("¿Qué $elem va aquí?") { d ->
+                    c.pts.removeAll { it.r == d.ruta }
+                    c.pts.add(PuntoCroquis(d.ruta, x, y, d.corto)); guardarC()
+                }
+                else -> {}
+            }
+        }
+        vista.alEnfocar = { refrescar() }
+        refrescar()
+        cargarImagen()
+        dlg.show()
+    }
+
+    /** Dibuja un marcador del croquis centrado en (x, y); [k] = píxeles por dp. */
+    private fun dibujarPildora(c: Canvas, x: Float, y: Float, m: MarcaC, k: Float, sel: Boolean) {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 15f * k; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER }
+        val h = 26f * k
+        val w = maxOf(p.measureText(m.t) + 14f * k, 30f * k)
+        val r = RectF(x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+        val (fondo, tinta) = when {
+            !m.ok -> C.vacio to Color.WHITE
+            m.est == 2 -> C.ok to Color.WHITE
+            m.est == 1 -> C.parcial to Color.WHITE
+            else -> Color.WHITE to C.primario
+        }
+        if (sel) {
+            p.style = Paint.Style.FILL; p.color = C.acento
+            c.drawRoundRect(RectF(r.left - 5 * k, r.top - 5 * k, r.right + 5 * k, r.bottom + 5 * k), h, h, p)
+        }
+        p.style = Paint.Style.FILL; p.color = fondo
+        c.drawRoundRect(r, h / 2, h / 2, p)
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = (if (m.crit) 3.5f else 1.8f) * k
+        p.color = if (m.crit) C.peligro else if (m.ok && m.est == 0) C.primario else Color.WHITE
+        c.drawRoundRect(r, h / 2, h / 2, p)
+        p.style = Paint.Style.FILL; p.color = tinta
+        c.drawText(m.t, x, y - (p.ascent() + p.descent()) / 2, p)
+        if (m.sub.isNotEmpty()) {
+            val q = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 10.5f * k; typeface = Typeface.DEFAULT_BOLD; textAlign = Paint.Align.CENTER }
+            val sw = q.measureText(m.sub) + 8f * k
+            val sr = RectF(x - sw / 2, r.bottom + 2 * k, x + sw / 2, r.bottom + 17 * k)
+            q.color = Color.argb(200, 11, 21, 32); c.drawRoundRect(sr, 4 * k, 4 * k, q)
+            q.color = Color.WHITE; c.drawText(m.sub, x, sr.centerY() - (q.ascent() + q.descent()) / 2, q)
+        }
+    }
+
+    /** Guarda la lámina del croquis (imagen + marcadores + leyenda) en <evento>/Croquis/ y ofrece abrirla o compartirla. */
+    private fun laminaCroquis(g: GrupoCroquis, c: Croquis, marcas: List<MarcaC>) {
+        val u = buscarArchivo(rutaCroquis(), c.img) ?: run { aviso("No se encontró la imagen"); return }
+        val espera = AlertDialog.Builder(this).setMessage("Generando lámina…").setCancelable(false).show()
+        val titulo = "$evento · ${g.titulo}"
+        Thread {
+            val res = runCatching {
+                val src = cargarBitmap(u, 2400)
+                val k = minOf(src.width, src.height) / 420f
+                val banda = (64 * k).toInt()
+                val out = Bitmap.createBitmap(src.width, src.height + banda, Bitmap.Config.ARGB_8888)
+                val cv = Canvas(out)
+                cv.drawColor(Color.WHITE)
+                cv.drawBitmap(src, 0f, 0f, null)
+                marcas.forEach { dibujarPildora(cv, it.x * src.width, it.y * src.height, it, k, false) }
+                val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = C.primario; textSize = 15f * k; typeface = Typeface.DEFAULT_BOLD }
+                val y0 = src.height.toFloat()
+                cv.drawRect(0f, y0, out.width.toFloat(), y0 + 3 * k, p)
+                cv.drawText(titulo, 10 * k, y0 + 24 * k, p)
+                p.typeface = Typeface.DEFAULT; p.textSize = 11.5f * k
+                var x = 10 * k
+                for ((col, txt) in listOf(Color.WHITE to "Sin fotos", C.parcial to "Incompleta", C.ok to "Completa")) {
+                    val r = RectF(x, y0 + 36 * k, x + 14 * k, y0 + 50 * k)
+                    p.style = Paint.Style.FILL; p.color = col; cv.drawRoundRect(r, 3 * k, 3 * k, p)
+                    p.style = Paint.Style.STROKE; p.strokeWidth = k; p.color = C.primario; cv.drawRoundRect(r, 3 * k, 3 * k, p)
+                    p.style = Paint.Style.FILL; p.color = C.tinta
+                    cv.drawText(txt, x + 19 * k, y0 + 47 * k, p)
+                    x += 19 * k + p.measureText(txt) + 16 * k
+                }
+                p.textAlign = Paint.Align.RIGHT; p.color = C.tenue
+                cv.drawText(SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date()), out.width - 10 * k, y0 + 47 * k, p)
+                src.recycle()
+                val nombre = "Croquis ${limpiar(g.titulo)}.png"
+                val dest = buscarArchivo(rutaCroquis(), nombre) ?: contentResolver.insert(coleccion, ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, rutaCroquis())
+                }) ?: error("sin archivo")
+                contentResolver.openOutputStream(dest, "wt")!!.use { out.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                out.recycle()
+                dest to nombre
+            }
+            runOnUiThread {
+                runCatching { espera.dismiss() }
+                res.onFailure { aviso("No se pudo generar la lámina: ${it.message}") }
+                res.onSuccess { (uri, nombre) ->
+                    mostrar(AlertDialog.Builder(this).setTitle("Lámina guardada")
+                        .setMessage("${rutaCroquis()}$nombre\n\nVa incluida en el ZIP del evento.")
+                        .setPositiveButton("Compartir") { _, _ ->
+                            val i = Intent(Intent.ACTION_SEND).setType("image/png")
+                                .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            runCatching { startActivity(Intent.createChooser(i, "Compartir lámina")) }.onFailure { aviso("No hay app para compartir") }
+                        }
+                        .setNeutralButton("Abrir") { _, _ ->
+                            runCatching { startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "image/png")
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }.onFailure { aviso("No hay app para ver imágenes") }
+                        }
+                        .setNegativeButton("Cerrar", null).create())
+                }
+            }
+        }.start()
+    }
+
+    /** Croquis con zoom (pellizcar / doble toque) y arrastre; los marcadores mantienen su tamaño en pantalla. */
+    private inner class VistaCroquis : View(this@MainActivity) {
+        var marcas: List<MarcaC> = emptyList()
+            set(v) { field = v; invalidate() }
+        var sel = -1
+        /** Toque simple: posición en la imagen (0–1) e índice del marcador tocado (-1 si ninguno). */
+        var alTocar: (Float, Float, Int) -> Unit = { _, _, _ -> }
+        /** La pantalla vuelve a primer plano (se cerró un diálogo o volvió la cámara). */
+        var alEnfocar: () -> Unit = {}
+        private var bmp: Bitmap? = null
+        private var escala = 1f
+        private var dx = 0f
+        private var dy = 0f
+        private val pintura = Paint(Paint.FILTER_BITMAP_FLAG)
+        private val k = resources.displayMetrics.density
+        private val escalador = android.view.ScaleGestureDetector(context,
+            object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(d: android.view.ScaleGestureDetector): Boolean { zoom(d.scaleFactor, d.focusX, d.focusY); return true }
+            })
+        private val gestos = android.view.GestureDetector(context, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (escala > 1.05f) { escala = 1f; dx = 0f; dy = 0f; invalidate() } else zoom(2.5f, e.x, e.y)
+                return true
+            }
+            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distX: Float, distY: Float): Boolean {
+                if (escala > 1.01f) { dx -= distX; dy -= distY; limitar(); invalidate() }
+                return true
+            }
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean { tocar(e.x, e.y); return true }
+        })
+
+        fun poner(b: Bitmap?) { bmp = b; escala = 1f; dx = 0f; dy = 0f; invalidate() }
+
+        private fun base(): RectF? {
+            val b = bmp ?: return null
+            if (width == 0 || height == 0) return null
+            val s = minOf(width.toFloat() / b.width, height.toFloat() / b.height)
+            val w = b.width * s; val h = b.height * s
+            return RectF((width - w) / 2, (height - h) / 2, (width + w) / 2, (height + h) / 2)
+        }
+
+        private fun pantallaX(nx: Float, r: RectF) = width / 2f + (r.left + nx * r.width() - width / 2f) * escala + dx
+        private fun pantallaY(ny: Float, r: RectF) = height / 2f + (r.top + ny * r.height() - height / 2f) * escala + dy
+
+        private fun tocar(sx: Float, sy: Float) {
+            val r = base() ?: return
+            var mejor = -1
+            var dist = 30f * k
+            marcas.forEachIndexed { i, m ->
+                val d = Math.hypot((pantallaX(m.x, r) - sx).toDouble(), (pantallaY(m.y, r) - sy).toDouble()).toFloat()
+                if (d < dist) { dist = d; mejor = i }
+            }
+            val nx = ((sx - dx - width / 2f) / escala + width / 2f - r.left) / r.width()
+            val ny = ((sy - dy - height / 2f) / escala + height / 2f - r.top) / r.height()
+            if (mejor < 0 && (nx !in 0f..1f || ny !in 0f..1f)) return
+            performClick()
+            alTocar(nx.coerceIn(0f, 1f), ny.coerceIn(0f, 1f), mejor)
+        }
+
+        private fun zoom(f: Float, fx: Float, fy: Float) {
+            val nueva = (escala * f).coerceIn(1f, 8f)
+            val q = nueva / escala
+            val cx = width / 2f; val cy = height / 2f
+            dx = (dx - (fx - cx)) * q + (fx - cx)
+            dy = (dy - (fy - cy)) * q + (fy - cy)
+            escala = nueva
+            if (escala <= 1.001f) { dx = 0f; dy = 0f }
+            limitar(); invalidate()
+        }
+
+        private fun limitar() {
+            val r = base() ?: return
+            val mx = maxOf(0f, (r.width() * escala - width) / 2)
+            val my = maxOf(0f, (r.height() * escala - height) / 2)
+            dx = dx.coerceIn(-mx, mx); dy = dy.coerceIn(-my, my)
+        }
+
+        override fun onDraw(c: Canvas) {
+            val b = bmp
+            if (b == null) {
+                pintura.color = Color.LTGRAY; pintura.textSize = 16f * k; pintura.textAlign = Paint.Align.CENTER
+                c.drawText("Cargando…", width / 2f, height / 2f, pintura); return
+            }
+            val r = base() ?: return
+            c.save()
+            c.translate(dx, dy)
+            c.scale(escala, escala, width / 2f, height / 2f)
+            c.drawBitmap(b, null, r, pintura)
+            c.restore()
+            marcas.forEachIndexed { i, m -> dibujarPildora(c, pantallaX(m.x, r), pantallaY(m.y, r), m, k, i == sel) }
+        }
+
+        override fun onWindowFocusChanged(foco: Boolean) {
+            super.onWindowFocusChanged(foco)
+            if (foco) alEnfocar()
+        }
+
+        override fun onTouchEvent(e: MotionEvent): Boolean {
+            escalador.onTouchEvent(e)
+            if (!escalador.isInProgress) gestos.onTouchEvent(e)
+            return true
+        }
+
+        override fun performClick(): Boolean = super.performClick()
+    }
+
     // ---------- Medición: foto con puntos de espesor ----------
     // Un solo flujo: foto de la zona → tocar cada punto medido → valor por foto del medidor
     // (lectura automática) o escrito / dictado → la foto muestra el espesor en cada punto →
@@ -4361,6 +4890,7 @@ class MainActivity : AppCompatActivity() {
                     "medidor" -> "Foto del medidor" to "Encuadra la pantalla del medidor; la lectura es automática"
                     "nombre" -> "Foto del nombre" to "Placa o rótulo con el nombre de la carpeta"
                     "planoFoto" -> "Foto del hallazgo" to "Encuadra la marca escrita, ej. Nivel 3 entre 50-51"
+                    "croquis" -> "Foto del croquis" to "Encuadra el croquis completo"
                     else -> "Foto" to null
                 }
                 val i = Intent(this, CamaraActivity::class.java).putExtra("destino", uri.toString())
