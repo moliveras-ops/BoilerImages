@@ -4565,6 +4565,13 @@ class MainActivity : AppCompatActivity() {
                 "Rosado = sin foto · rojo = con foto. Los candados sin indicación no se registran."
             acciones.removeAllViews()
             acciones.addView(accionOscura(R.drawable.ic_tabla, "Lista") { lista() })
+            acciones.addView(accionOscura(R.drawable.ic_nota, "Informe") {
+                if (cd.ind.isEmpty()) aviso("Aún no hay indicaciones")
+                else menuGrande("Informe de candados (${cd.ind.size} indicaciones)", listOf<Pair<String, () -> Unit>>(
+                    "📄  Word (.docx)\nEditable: resumen, láminas y fichas con fotos" to { informeCandados(cd, true) },
+                    "📄  PDF\nListo para enviar" to { informeCandados(cd, false) },
+                    "📊  Excel del evento\nHoja Candados con el detalle" to { exportarExcel() }))
+            })
             acciones.addView(accionOscura(R.drawable.ic_compartir, "Lámina") { laminaCandados(cd, nivel) })
             acciones.addView(accionOscura(R.drawable.ic_editar, "Ajustes") { ajustes() })
         }
@@ -4583,13 +4590,9 @@ class MainActivity : AppCompatActivity() {
         d.getButton(AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener { dictar(et) }
     }
 
-    /** Lámina PNG del nivel: grilla con las indicaciones y la lista, en <evento>/Candados/. */
-    private fun laminaCandados(cd: Candados, nivel: Int) {
-        val lista = cd.ind.filter { it.n == nivel }.sortedWith(compareBy<IndCand>({ it.p }, { it.c }))
-        val espera = AlertDialog.Builder(this).setMessage("Generando lámina…").setCancelable(false).show()
-        Thread {
-            val res = runCatching {
-                val fotos = fotosCandados()
+    /** Imagen de la lámina de un nivel: grilla con las indicaciones y su lista. */
+    private fun imagenCandados(cd: Candados, nivel: Int, fotos: Map<String, Int>): Bitmap {
+                val lista = cd.ind.filter { it.n == nivel }.sortedWith(compareBy<IndCand>({ it.p }, { it.c }))
                 val w = 1400
                 val u = w / (anchoCand(cd.t) + 20)
                 val cab = 70 * u; val gy = cab
@@ -4622,6 +4625,15 @@ class MainActivity : AppCompatActivity() {
                     cv.drawText("${textoCand(i.p, i.c)}  —  ${i.k}" + (if (i.o.isNotBlank()) "  ·  ${i.o}" else "") +
                         "  (${fotos[rutaCand(i.n, i.p, i.c)] ?: 0} foto/s)", 10 * u, y, tp)
                 }
+                return bmp
+    }
+
+    /** Lámina PNG del nivel en <evento>/Candados/. */
+    private fun laminaCandados(cd: Candados, nivel: Int) {
+        val espera = AlertDialog.Builder(this).setMessage("Generando lámina…").setCancelable(false).show()
+        Thread {
+            val res = runCatching {
+                val bmp = imagenCandados(cd, nivel, fotosCandados())
                 val nombre = "Candados Nivel $nivel.png"
                 val dest = buscarArchivo(rutaCandados(), nombre) ?: contentResolver.insert(coleccion, ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
@@ -4649,6 +4661,207 @@ class MainActivity : AppCompatActivity() {
                         }
                         .setNegativeButton("Cerrar", null).create())
                 }
+            }
+        }.start()
+    }
+
+    /** Fotos de una indicación para el informe: la copia marcada reemplaza a su original. */
+    private fun fotosInforme(ruta: String): List<FotoInfo> {
+        val fs = fotosDe(ruta).sortedBy { it.nombre }
+        val marcadas = fs.filter { it.nombre.contains("_marcada") }
+        return fs.filter { !it.nombre.contains("_marcada") }.map { o ->
+            val base = o.nombre.substringBeforeLast('.')
+            marcadas.lastOrNull { it.nombre.startsWith(base + "_marcada") } ?: o
+        }
+    }
+
+    private fun nombreInformeCand(word: Boolean) = "Informe candados ${limpiar(evento)}.${if (word) "docx" else "pdf"}"
+
+    private fun guardarArchivoCand(nombre: String, mime: String, bytes: (java.io.OutputStream) -> Unit): Uri? {
+        val uri = buscarArchivo(rutaCandados(), nombre) ?: contentResolver.insert(coleccion, ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, rutaCandados())
+        }) ?: return null
+        contentResolver.openOutputStream(uri, "wt")?.use { bytes(it) } ?: return null
+        return uri
+    }
+
+    private fun ordenCand(cd: Candados) = cd.ind.filter { it.n in 1..cd.n && it.p in 1..cd.p && it.c in 1 until cd.t }
+        .sortedWith(compareBy<IndCand>({ it.n }, { it.p }, { it.c }))
+
+    /** Word: resumen, lámina de cada nivel con indicaciones y una ficha por indicación con sus fotos. */
+    private fun generarWordCandados(cd: Candados): Uri? {
+        val d = Docx()
+        val fecha = SimpleDateFormat("dd-MM-yyyy", Locale.US).format(Date())
+        val lista = ordenCand(cd)
+        val fotos = fotosCandados()
+        d.titulo("Inspección de candados · $evento", 16)
+        d.texto("${cd.n} niveles · ${cd.p} paneles · ${cd.t} tubos por panel (${cd.t - 1} candados entre tubos) · $fecha", 10, color = "5D6B78")
+        d.titulo("Resumen", 13)
+        val tipos = lista.map { it.k }.distinct()
+        d.tabla(listOf(listOf("Nivel") + tipos + listOf("Total")) +
+            (1..cd.n).map { n -> listOf("Nivel $n") + tipos.map { k -> lista.count { it.n == n && it.k == k }.toString() } +
+                listOf(lista.count { it.n == n }.toString()) } +
+            listOf(listOf("Total") + tipos.map { k -> lista.count { it.k == k }.toString() } + listOf(lista.size.toString())),
+            listOf(2.5) + tipos.map { minOf(3.0, 12.0 / maxOf(1, tipos.size)) } + listOf(1.8))
+        d.titulo("Detalle de indicaciones", 13)
+        d.tabla(listOf(listOf("Código", "Nivel", "Panel", "Candado", "Indicación", "Fotos", "Nota")) +
+            lista.map { i -> listOf(codCand(i.n, i.p, i.c), "${i.n}", "%02d".format(i.p), "T%02d-%02d".format(i.c, i.c + 1), i.k,
+                "${fotos[rutaCand(i.n, i.p, i.c)] ?: 0}", i.o) },
+            listOf(3.4, 1.2, 1.3, 1.9, 2.4, 1.2, 5.6))
+        d.texto("Candado Tyy-zz = candado entre los tubos yy y zz (tubos numerados de izquierda a derecha).", 8, color = "5D6B78")
+        for (n in lista.map { it.n }.distinct()) {
+            d.titulo("Nivel $n", 13, saltoPagina = true)
+            val lam = imagenCandados(cd, n, fotos)
+            val lb = java.io.ByteArrayOutputStream().also { lam.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+            d.imagen(lb, true, lam.width, lam.height, 17.0, 23.0)
+            lam.recycle()
+        }
+        lista.forEachIndexed { k, i ->
+            d.titulo("${codCand(i.n, i.p, i.c)} · ${i.k}", 13, saltoPagina = k == 0 || k % 2 == 0)
+            d.tabla(listOf(listOf("Ubicación", "Nivel ${i.n} · Panel %02d · candado entre tubos %d y %d".format(i.p, i.c, i.c + 1)),
+                listOf("Indicación", i.k), listOf("Nota", i.o.ifBlank { "—" })), listOf(3.5, 13.5), encabezado = false, primeraColNegrita = true)
+            val fs = fotosInforme(rutaCand(i.n, i.p, i.c))
+            if (fs.isEmpty()) d.texto("Sin foto", 10, color = "5D6B78", centrado = true)
+            fs.take(4).forEach { f ->
+                val bmp = runCatching { cargarBitmap(f.uri, 1600) }.getOrNull() ?: return@forEach
+                val fb = java.io.ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }.toByteArray()
+                d.imagen(fb, false, bmp.width, bmp.height, 15.0, if (fs.size > 1) 7.5 else 9.0)
+                bmp.recycle()
+            }
+            if (fs.size > 4) d.texto("${fs.size - 4} foto(s) más en la carpeta del candado", 8, color = "5D6B78")
+        }
+        return guardarArchivoCand(nombreInformeCand(true), "application/vnd.openxmlformats-officedocument.wordprocessingml.document") { it.write(d.bytes()) }
+    }
+
+    /** PDF A4: hoja de resumen, lámina de cada nivel con indicaciones y fichas (dos por hoja) con hasta dos fotos. */
+    private fun generarPdfCandados(cd: Candados): Uri? {
+        val pdf = android.graphics.pdf.PdfDocument()
+        val anchoH = 595; val altoH = 842; val mg = 28f
+        val azul = C.primario; val gris = Color.parseColor("#5D6B78"); val linea = Color.parseColor("#C9D2DC")
+        fun pinta(t: Float, col: Int, neg: Boolean = false) = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = t; color = col; typeface = if (neg) Typeface.DEFAULT_BOLD else Typeface.DEFAULT }
+        val fecha = SimpleDateFormat("dd-MM-yyyy", Locale.US).format(Date())
+        val lista = ordenCand(cd)
+        val fotos = fotosCandados()
+        var n = 0
+        fun cabecera(c: Canvas, t: String) {
+            c.drawText(t, mg, mg + 16f, pinta(14f, azul, true))
+            c.drawText("$evento · $fecha", mg, mg + 32f, pinta(9f, gris))
+            c.drawLine(mg, mg + 40f, anchoH - mg, mg + 40f, Paint().apply { color = azul; strokeWidth = 1.5f })
+        }
+        fun pie(c: Canvas) = c.drawText("BoilerImage · Informe de candados · hoja $n", anchoH - mg, altoH - mg + 4f,
+            pinta(8f, gris).apply { textAlign = Paint.Align.RIGHT })
+        try {
+            // Resumen (la tabla sigue en hojas nuevas si no cabe)
+            var k = 0
+            do {
+                val pg = pdf.startPage(android.graphics.pdf.PdfDocument.PageInfo.Builder(anchoH, altoH, ++n).create())
+                val c = pg.canvas
+                cabecera(c, "Inspección de candados")
+                var y = mg + 62f
+                if (k == 0) {
+                    c.drawText("${cd.n} niveles · ${cd.p} paneles · ${cd.t} tubos por panel (${cd.t - 1} candados) · ${lista.size} indicación(es)",
+                        mg, y, pinta(10f, Color.BLACK)); y += 18f
+                    val porNivel = (1..cd.n).joinToString("   ") { nv -> "N$nv: ${lista.count { it.n == nv }}" }
+                    c.drawText(porNivel, mg, y, pinta(10f, Color.BLACK, true)); y += 26f
+                }
+                val cols = floatArrayOf(0f, 110f, 160f, 215f, 285f, 370f, 410f)
+                val enc = listOf("Código", "Nivel", "Panel", "Candado", "Indicación", "Fotos", "Nota")
+                c.drawRect(mg, y - 12f, anchoH - mg, y + 5f, Paint().apply { color = Color.parseColor("#D6E3F0") })
+                enc.forEachIndexed { j, e -> c.drawText(e, mg + 3f + cols[j], y, pinta(9f, Color.BLACK, true)) }
+                y += 18f
+                while (k < lista.size && y < altoH - mg - 20f) {
+                    val i = lista[k]
+                    val celdas = listOf(codCand(i.n, i.p, i.c), "${i.n}", "%02d".format(i.p), "T%02d-%02d".format(i.c, i.c + 1), i.k,
+                        "${fotos[rutaCand(i.n, i.p, i.c)] ?: 0}", i.o.take(32))
+                    celdas.forEachIndexed { j, e -> c.drawText(e, mg + 3f + cols[j], y, pinta(9f, Color.BLACK)) }
+                    c.drawLine(mg, y + 5f, anchoH - mg, y + 5f, Paint().apply { color = linea; strokeWidth = 0.6f })
+                    y += 16f; k++
+                }
+                if (lista.isEmpty()) c.drawText("Sin indicaciones registradas", mg, y, pinta(10f, gris))
+                pie(c); pdf.finishPage(pg)
+            } while (k < lista.size)
+            // Lámina de cada nivel con indicaciones
+            for (nv in lista.map { it.n }.distinct()) {
+                val lam = imagenCandados(cd, nv, fotos)
+                val pg = pdf.startPage(android.graphics.pdf.PdfDocument.PageInfo.Builder(anchoH, altoH, ++n).create())
+                val c = pg.canvas
+                cabecera(c, "Nivel $nv")
+                val top = mg + 50f
+                val esc = minOf((anchoH - 2 * mg) / lam.width, (altoH - mg - 20f - top) / lam.height)
+                val w = lam.width * esc; val h = lam.height * esc
+                c.drawBitmap(lam, null, RectF((anchoH - w) / 2, top, (anchoH + w) / 2, top + h), Paint(Paint.FILTER_BITMAP_FLAG))
+                lam.recycle()
+                pie(c); pdf.finishPage(pg)
+            }
+            // Fichas
+            val altoFicha = (altoH - 2 * mg - 46f - 20f) / 2
+            var i = 0
+            while (i < lista.size) {
+                val pg = pdf.startPage(android.graphics.pdf.PdfDocument.PageInfo.Builder(anchoH, altoH, ++n).create())
+                val c = pg.canvas
+                cabecera(c, "Detalle de indicaciones")
+                for (f in 0 until 2) {
+                    if (i >= lista.size) break
+                    val ind = lista[i]
+                    val y0 = mg + 46f + f * altoFicha
+                    val x0 = mg; val x1 = anchoH - mg
+                    c.drawRect(x0, y0 + 4f, x1, y0 + 30f, Paint().apply { color = Color.parseColor("#EEF1F5") })
+                    c.drawText("${codCand(ind.n, ind.p, ind.c)}  ·  ${ind.k}", x0 + 8f, y0 + 22f, pinta(13f, Color.BLACK, true))
+                    val datos = "Nivel ${ind.n} · Panel %02d · candado entre tubos %d y %d".format(ind.p, ind.c, ind.c + 1) +
+                        (if (ind.o.isNotBlank()) "  ·  ${ind.o}" else "")
+                    val lay = android.text.StaticLayout.Builder.obtain(datos, 0, datos.length, pinta(10f, Color.BLACK), (x1 - x0 - 8f).toInt()).build()
+                    c.save(); c.translate(x0 + 4f, y0 + 36f); lay.draw(c); c.restore()
+                    val fy0 = y0 + 40f + lay.height; val fy1 = y0 + altoFicha - 12f
+                    val fs = fotosInforme(rutaCand(ind.n, ind.p, ind.c)).take(2)
+                    if (fs.isEmpty()) {
+                        c.drawRect(x0, fy0, x1, fy1, Paint().apply { style = Paint.Style.STROKE; color = linea; strokeWidth = 0.8f })
+                        c.drawText("Sin foto", (x0 + x1) / 2, (fy0 + fy1) / 2, pinta(11f, gris).apply { textAlign = Paint.Align.CENTER })
+                    }
+                    val ancho = (x1 - x0 - (fs.size - 1) * 8f) / maxOf(1, fs.size)
+                    fs.forEachIndexed { j, fo ->
+                        val bmp = runCatching { cargarBitmap(fo.uri, 1400) }.getOrNull() ?: return@forEachIndexed
+                        val bx0 = x0 + j * (ancho + 8f); val bx1 = bx0 + ancho
+                        val esc = minOf((bx1 - bx0) / bmp.width, (fy1 - fy0) / bmp.height)
+                        val w = bmp.width * esc; val h = bmp.height * esc
+                        val dx = bx0 + (ancho - w) / 2; val dy = fy0 + (fy1 - fy0 - h) / 2
+                        c.drawBitmap(bmp, null, RectF(dx, dy, dx + w, dy + h), Paint(Paint.FILTER_BITMAP_FLAG))
+                        c.drawRect(dx, dy, dx + w, dy + h, Paint().apply { style = Paint.Style.STROKE; color = linea; strokeWidth = 0.8f })
+                        bmp.recycle()
+                    }
+                    if (f == 0 && i + 1 < lista.size)
+                        c.drawLine(x0, y0 + altoFicha - 2f, x1, y0 + altoFicha - 2f, Paint().apply { color = linea; strokeWidth = 0.8f })
+                    i++
+                }
+                pie(c); pdf.finishPage(pg)
+            }
+            return guardarArchivoCand(nombreInformeCand(false), "application/pdf") { pdf.writeTo(it) }
+        } finally { pdf.close() }
+    }
+
+    private fun informeCandados(cd: Candados, word: Boolean) {
+        val tipo = if (word) "Word" else "PDF"
+        val mime = if (word) "application/vnd.openxmlformats-officedocument.wordprocessingml.document" else "application/pdf"
+        val espera = AlertDialog.Builder(this).setMessage("Generando informe $tipo…").setCancelable(false).show()
+        Thread {
+            val res = runCatching { if (word) generarWordCandados(cd) else generarPdfCandados(cd) }
+            runOnUiThread {
+                runCatching { espera.dismiss() }
+                val uri = res.getOrNull()
+                if (uri == null) { aviso("No se pudo generar el informe" + (res.exceptionOrNull()?.message?.let { ": $it" } ?: "")); return@runOnUiThread }
+                mostrar(AlertDialog.Builder(this).setTitle("Informe $tipo listo")
+                    .setMessage("${rutaCandados()}${nombreInformeCand(word)}\n\nResumen, lámina de cada nivel y ficha con fotos de cada indicación (${ordenCand(cd).size}).")
+                    .setPositiveButton("Compartir") { _, _ ->
+                        val i = Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        runCatching { startActivity(Intent.createChooser(i, "Compartir informe")) }.onFailure { aviso("No hay app para compartir") }
+                    }
+                    .setNeutralButton("Abrir") { _, _ ->
+                        runCatching { startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
+                            .onFailure { aviso("No hay app para abrir el $tipo") }
+                    }
+                    .setNegativeButton("Cerrar", null).create())
             }
         }.start()
     }
