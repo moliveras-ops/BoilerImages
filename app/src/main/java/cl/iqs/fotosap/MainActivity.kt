@@ -234,6 +234,12 @@ class MainActivity : AppCompatActivity() {
             else { trasFotoPlano = null; uri?.let { runCatching { contentResolver.delete(it, null, null) } } }
             return
         }
+        if (modo == "candado") {
+            val luego = trasFotoCandado; trasFotoCandado = null
+            if (!ok) uri?.let { runCatching { contentResolver.delete(it, null, null) } }
+            luego?.invoke()
+            return
+        }
         if (modo == "croquis") {
             val luego = trasImagenCroquis; trasImagenCroquis = null
             if (ok && uri != null && luego != null) luego(uri) else uri?.let { runCatching { contentResolver.delete(it, null, null) } }
@@ -556,6 +562,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(boton("💾  Guardar como plantilla de caldera") { guardarComoPlantilla() })
         col.addView(boton("📝  Resumen de notas (${notasCompiladas().size})") { verResumenNotas() })
         col.addView(boton("🗺  Planos de ubicación (${planos().size})") { menuPlanos() })
+        col.addView(boton("🔒  Candados: levantamiento rápido (${candados().ind.size})") { abrirCandados() })
         col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
         col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
         col.addView(espacio(16))
@@ -742,7 +749,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { 0 }
         guardarEventos(eventosGuardados().filter { it != nombre })
         prefs.edit().remove("terreno_$nombre").remove("med_$nombre").remove("tipos_$nombre").remove("caldera_$nombre")
-            .remove("insp_$nombre").remove("cond_$nombre").remove("tipoEv_$nombre").remove("planos_$nombre").remove("croquis_$nombre").apply()
+            .remove("insp_$nombre").remove("cond_$nombre").remove("tipoEv_$nombre").remove("planos_$nombre").remove("croquis_$nombre").remove("cand_$nombre").remove("cand_nivel_$nombre").apply()
         val quedan = resumenEventos()[nombre]?.first ?: 0
         if (quedan > 0)
             aviso("Se borraron $borradas fotos. Quedan $quedan que la app no puede borrar: elimínalas desde Mis archivos.")
@@ -1198,6 +1205,7 @@ class MainActivity : AppCompatActivity() {
         if (prof == 0 && elem) {
             col.addView(boton("📝  Resumen de notas (${notasCompiladas().size})") { verResumenNotas() })
             col.addView(boton("🗺  Planos de ubicación (${planos().size})") { menuPlanos() })
+            col.addView(boton("🔒  Candados: levantamiento rápido (${candados().ind.size})") { abrirCandados() })
             col.addView(boton("📊  Exportar a Excel (.xlsx)") { exportarExcel() })
             col.addView(boton("📦  Exportar evento (ZIP)") { menuZip() })
         }
@@ -3441,6 +3449,16 @@ class MainActivity : AppCompatActivity() {
                        r.nota.ifBlank { null }, r.foto.ifBlank { null })
             }
         }
+        candados().let { cd ->
+            if (cd.ind.isNotEmpty()) {
+                val h = x.hoja("Candados", listOf("Nivel", "Panel", "Candado (entre tubos)", "Indicación", "Nota", "Fotos", "Código"),
+                               listOf(8, 8, 20, 16, 40, 8, 18))
+                cd.ind.sortedWith(compareBy<IndCand>({ it.n }, { it.p }, { it.c })).forEach { i ->
+                    h.fila(i.n, i.p, "T%02d-%02d".format(i.c, i.c + 1), i.k, i.o.ifBlank { null },
+                           archivos[rutaCand(i.n, i.p, i.c)]?.size ?: 0, codCand(i.n, i.p, i.c))
+                }
+            }
+        }
         val nombre = "BoilerImage $evento.xlsx"
         val ruta = "$raiz/$evento/"
         val uri = buscarArchivo(ruta, nombre) ?: contentResolver.insert(coleccion, ContentValues().apply {
@@ -4275,6 +4293,366 @@ class MainActivity : AppCompatActivity() {
         override fun performClick(): Boolean = super.performClick()
     }
 
+    // ---------- Levantamiento rápido de candados ----------
+    // Por nivel, una grilla de paneles × tubos con un candado entre cada par de tubos. Solo se registran
+    // los candados con indicación (Grieta, Rotura, Desgarro u Otro), con foto opcional. Prefs "cand_<evento>"
+    // (va en el respaldo): {"p": paneles, "n": niveles, "t": tubos por panel, "i": [{n, p, c, k, o}]}; c = candado
+    // entre los tubos c y c+1. Fotos en <evento>/Candados/Nivel N/Pxx Tyy-zz/Nn-Pxx-Tyy-zz_<tipo>_k.jpg.
+
+    private class IndCand(val n: Int, val p: Int, val c: Int, var k: String, var o: String = "")
+    private class Candados(var p: Int = 25, var n: Int = 7, var t: Int = 15, val ind: MutableList<IndCand> = mutableListOf())
+    private val tiposCandado = listOf("Grieta", "Rotura", "Desgarro")
+
+    private fun candados(): Candados {
+        val o = runCatching { JSONObject(prefs.getString("cand_$evento", null) ?: "{}") }.getOrDefault(JSONObject())
+        val cd = Candados(o.optInt("p", 25), o.optInt("n", 7), o.optInt("t", 15))
+        val a = o.optJSONArray("i") ?: JSONArray()
+        for (k in 0 until a.length()) a.optJSONObject(k)?.let {
+            cd.ind.add(IndCand(it.optInt("n"), it.optInt("p"), it.optInt("c"), it.optString("k"), it.optString("o")))
+        }
+        return cd
+    }
+
+    private fun guardarCandados(cd: Candados) {
+        val a = JSONArray()
+        cd.ind.forEach { a.put(JSONObject().put("n", it.n).put("p", it.p).put("c", it.c).put("k", it.k).put("o", it.o)) }
+        prefs.edit().putString("cand_$evento", JSONObject().put("p", cd.p).put("n", cd.n).put("t", cd.t).put("i", a).toString()).apply()
+    }
+
+    private fun codCand(n: Int, p: Int, c: Int) = "N%d-P%02d-T%02d-%02d".format(n, p, c, c + 1)
+    private fun textoCand(p: Int, c: Int) = "P%02d · T%02d-%02d".format(p, c, c + 1)
+    private fun rutaCandados() = "$raiz/$evento/Candados/"
+    private fun rutaCand(n: Int, p: Int, c: Int) = "${rutaCandados()}Nivel $n/" + "P%02d T%02d-%02d/".format(p, c, c + 1)
+
+    /** Fotos por carpeta de candado (una sola consulta). */
+    private fun fotosCandados(): Map<String, Int> {
+        val m = HashMap<String, Int>()
+        runCatching {
+            contentResolver.query(coleccion, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH),
+                "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?" + soloImagenes, arrayOf("${rutaCandados()}%"), null)?.use { c ->
+                while (c.moveToNext()) { val r = c.getString(0) ?: continue; m[r] = (m[r] ?: 0) + 1 }
+            }
+        }
+        return m
+    }
+
+    /** Ancho del dibujo de un panel en unidades: etiqueta 30 + tubos cada 20 (12 de ancho) + margen. */
+    private fun anchoCand(t: Int) = 46f + (t - 1) * 20f
+
+    /**
+     * Dibuja una fila de tubos con sus candados desde (x0, y0); [u] = píxeles por unidad, [alto] del tubo en unidades.
+     * [marcas]: candado → (tiene foto). [sel] = candado resaltado (-1 ninguno).
+     */
+    private fun dibujarFilaCand(cv: Canvas, x0: Float, y0: Float, u: Float, alto: Float, t: Int,
+                                marcas: Map<Int, Boolean>, sel: Int) {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        for (i in 0 until t) {
+            val r = RectF(x0 + i * 20 * u, y0, x0 + (i * 20 + 12) * u, y0 + alto * u)
+            p.style = Paint.Style.FILL; p.color = Color.parseColor("#DCE2E9"); cv.drawRoundRect(r, 6 * u, 6 * u, p)
+            p.color = Color.WHITE; cv.drawRect(r.left + 3 * u, r.top + 4 * u, r.left + 5 * u, r.bottom - 4 * u, p)
+            p.style = Paint.Style.STROKE; p.strokeWidth = 0.8f * u; p.color = Color.parseColor("#7D8A98"); cv.drawRoundRect(r, 6 * u, 6 * u, p)
+        }
+        for (c in 1 until t) {
+            val cx = x0 + ((c - 1) * 20 + 16) * u
+            val cy = y0 + alto * u / 2
+            val foto = marcas[c]
+            val h = if (foto != null) 11f else 8f
+            val r = RectF(cx - 6 * u, cy - h / 2 * u, cx + 6 * u, cy + h / 2 * u)
+            if (c == sel) { p.style = Paint.Style.FILL; p.color = C.acento; cv.drawRoundRect(RectF(r.left - 3 * u, r.top - 3 * u, r.right + 3 * u, r.bottom + 3 * u), 4 * u, 4 * u, p) }
+            p.style = Paint.Style.FILL
+            p.color = when (foto) { null -> Color.WHITE; true -> C.peligro; false -> Color.parseColor("#F4B4B4") }
+            cv.drawRoundRect(r, 2 * u, 2 * u, p)
+            p.style = Paint.Style.STROKE; p.strokeWidth = (if (foto != null) 1.6f else 0.8f) * u
+            p.color = if (foto != null) C.peligro else Color.parseColor("#7D8A98")
+            cv.drawRoundRect(r, 2 * u, 2 * u, p)
+        }
+    }
+
+    /** Grilla de un nivel: una fila por panel. Con pocos tubos se toca el candado directo; con muchos, el panel. */
+    private inner class VistaCandados : View(this@MainActivity) {
+        var cd = Candados()
+        var nivel = 1
+        var fotos: Map<String, Int> = emptyMap()
+        var sel: Pair<Int, Int>? = null
+        var alTocar: (Int, Int) -> Unit = { _, _ -> }   // panel, candado (0 = solo el panel)
+        private val gestos = android.view.GestureDetector(context, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+            override fun onSingleTapUp(e: MotionEvent): Boolean { tocar(e.x, e.y); return true }
+        })
+        private fun u() = width / anchoCand(cd.t)
+        fun actualizar() { requestLayout(); invalidate() }
+        override fun onMeasure(wSpec: Int, hSpec: Int) {
+            val w = MeasureSpec.getSize(wSpec)
+            setMeasuredDimension(w, ((10 + cd.p * 34) * w / anchoCand(cd.t)).toInt())
+        }
+        private fun tocar(x: Float, y: Float) {
+            val u = u(); if (u <= 0f) return
+            val p = ((y / u - 6) / 34).toInt() + 1
+            if (p !in 1..cd.p) return
+            val directo = cd.t <= 16
+            val c = if (directo) Math.round((x / u - 46) / 20f).toInt() + 1 else 0
+            performClick()
+            alTocar(p, if (directo) c.coerceIn(1, cd.t - 1) else 0)
+        }
+        override fun onDraw(c: Canvas) {
+            val u = u()
+            val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 10f * u; typeface = medio }
+            for (p in 1..cd.p) {
+                val y = (6 + (p - 1) * 34) * u
+                val marcas = cd.ind.filter { it.n == nivel && it.p == p }.associate { it.c to ((fotos[rutaCand(nivel, p, it.c)] ?: 0) > 0) }
+                tp.color = if (marcas.isEmpty()) C.tenue else C.peligro
+                c.drawText("P%02d".format(p), 0f, y + 18 * u, tp)
+                dibujarFilaCand(c, 30 * u, y, u, 28f, cd.t, marcas, sel?.takeIf { it.first == p }?.second ?: -1)
+            }
+        }
+        override fun onTouchEvent(e: MotionEvent) = gestos.onTouchEvent(e)
+        override fun performClick(): Boolean = super.performClick()
+    }
+
+    /** Un panel en grande (para tocar el candado exacto cuando hay muchos tubos); se desplaza a lo ancho si no cabe. */
+    private inner class VistaPanelCand(val t: Int, val marcas: Map<Int, Boolean>, val alTocar: (Int) -> Unit) : View(this@MainActivity) {
+        private val u = dp(34) / 20f   // 34 dp por tubo
+        private val gestos = android.view.GestureDetector(context, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+            override fun onSingleTapUp(e: MotionEvent): Boolean {
+                val c = Math.round((e.x / u - 26) / 20f).toInt() + 1
+                performClick(); alTocar(c.coerceIn(1, t - 1)); return true
+            }
+        })
+        override fun onMeasure(wSpec: Int, hSpec: Int) = setMeasuredDimension((anchoCand(t) * u).toInt(), (150 * u).toInt())
+        override fun onDraw(c: Canvas) {
+            val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 9f * u; color = C.tenue; textAlign = Paint.Align.CENTER }
+            for (i in 0 until t) c.drawText("${i + 1}", (10 + i * 20 + 6) * u, 12 * u, tp)
+            dibujarFilaCand(c, 10 * u, 18 * u, u, 124f, t, marcas, -1)
+        }
+        override fun onTouchEvent(e: MotionEvent) = gestos.onTouchEvent(e)
+        override fun performClick(): Boolean = super.performClick()
+    }
+
+    private var trasFotoCandado: (() -> Unit)? = null
+    private var tituloFotoCandado = ""
+
+    private fun abrirCandados() {
+        var cd = candados()
+        var nivel = prefs.getInt("cand_nivel_$evento", cd.n).coerceIn(1, cd.n)
+        val dlg = dialogoPantallaCompleta()
+        val tituloTv = TextView(this)
+        val raizV = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(C.oscuro) }
+        raizV.addView(barraOscura(tituloTv) { dlg.dismiss() })
+        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(6), dp(6), dp(6), dp(6)) }
+        raizV.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(chips) })
+        val vista = VistaCandados()
+        val cuerpo = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(C.fondo); setPadding(dp(8), dp(8), dp(8), dp(16))
+            addView(vista)
+        }
+        raizV.addView(ScrollView(this).apply { addView(cuerpo) }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val ayuda = TextView(this).apply { textSize = 13f; setTextColor(Color.parseColor("#C9D3DE")); setPadding(dp(12), dp(6), dp(12), dp(4)) }
+        raizV.addView(ayuda)
+        val acciones = filaOscura()
+        raizV.addView(acciones)
+        dlg.setContentView(raizV)
+        dlg.setOnDismissListener { render() }
+        val fondoBoton = Color.parseColor("#1C2A3A")
+        lateinit var refrescar: () -> Unit
+
+        fun guardarC() { guardarCandados(cd); refrescar() }
+
+        fun tomarFoto(i: IndCand) {
+            val ruta = rutaCand(i.n, i.p, i.c)
+            val slug = quitarTildes(i.k).replace(Regex("[^a-z0-9]+"), "-").trim('-').take(20).ifEmpty { "indicacion" }
+            val pre = "${codCand(i.n, i.p, i.c)}_${slug}_"
+            val u = crearImagen(ruta, "$pre${libre(ruta, "$pre%d.jpg")}.jpg") ?: run { aviso("No se pudo crear el archivo"); return }
+            tituloFotoCandado = "${codCand(i.n, i.p, i.c)} · ${i.k}"
+            trasFotoCandado = { refrescar() }
+            lanzarCamara(u, "candado")
+        }
+
+        fun elegirTipo(titulo: String, f: (String) -> Unit) {
+            menuGrande(titulo, tiposCandado.map { k -> "🚦  $k" to { f(k) } } +
+                listOf("✏️  Otro (escribir o dictar)" to { notaCandado("Otra indicación", "") { t -> if (t.isNotBlank()) f(t.trim().take(40)) } }))
+        }
+
+        fun menuInd(i: IndCand) {
+            val n = fotosDe(rutaCand(i.n, i.p, i.c)).size
+            val cod = codCand(i.n, i.p, i.c)
+            menuGrande("$cod · ${i.k}" + (if (i.o.isNotBlank()) "\n${i.o}" else ""), listOfNotNull<Pair<String, () -> Unit>>(
+                if (n > 0) "🖼  Ver fotos ($n)" to { galeriaFotos(cod, rutaCand(i.n, i.p, i.c)) } else null,
+                "📷  ${if (n > 0) "Otra foto" else "Tomar foto"}" to { tomarFoto(i) },
+                "🚦  Cambiar indicación (${i.k})" to { elegirTipo("Indicación $cod") { k -> i.k = k; guardarC() } },
+                "📝  Nota${if (i.o.isNotBlank()) ": " + i.o.take(30) else " (escribir o dictar)"}" to {
+                    notaCandado("Nota $cod", i.o) { t -> i.o = t.trim(); guardarC() }
+                },
+                "🗑  Quitar indicación" to {
+                    confirmar("¿Quitar la indicación de $cod?" + if (n > 0) " Las $n foto(s) no se borran." else "") { cd.ind.remove(i); guardarC() }
+                }))
+        }
+
+        fun tocarCandado(p: Int, c: Int) {
+            vista.sel = p to c; vista.invalidate()
+            val ex = cd.ind.firstOrNull { it.n == nivel && it.p == p && it.c == c }
+            if (ex != null) { menuInd(ex); return }
+            elegirTipo("${codCand(nivel, p, c)}\n¿Qué indicación tiene?") { k ->
+                val i = IndCand(nivel, p, c, k); cd.ind.add(i); guardarC()
+                if (prefs.getBoolean("cand_foto", true)) tomarFoto(i)
+            }
+        }
+
+        fun abrirPanel(p: Int) {
+            val marcas = cd.ind.filter { it.n == nivel && it.p == p }.associate { it.c to ((fotosCandados()[rutaCand(nivel, p, it.c)] ?: 0) > 0) }
+            var d: AlertDialog? = null
+            val v = VistaPanelCand(cd.t, marcas) { c -> d?.dismiss(); tocarCandado(p, c) }
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; setPadding(dp(8), dp(4), dp(8), 0)
+                addView(texto("Toca el candado (entre dos tubos). Desliza a lo ancho si no se ven todos.", 13f))
+                addView(HorizontalScrollView(context).apply { addView(v) })
+            }
+            d = mostrar(AlertDialog.Builder(this).setTitle("Nivel $nivel · Panel %02d".format(p)).setView(col)
+                .setNegativeButton("Cerrar", null).create())
+        }
+
+        fun lista() {
+            val todas = cd.ind.sortedWith(compareBy<IndCand>({ it.n }, { it.p }, { it.c }))
+            if (todas.isEmpty()) { aviso("Aún no hay indicaciones"); return }
+            val f = fotosCandados()
+            menuGrande("${todas.size} indicaciones", todas.map { i ->
+                val n = f[rutaCand(i.n, i.p, i.c)] ?: 0
+                "🚦  N${i.n} · ${textoCand(i.p, i.c)}\n${i.k}" + (if (n > 0) " · $n foto(s)" else " · sin foto") to {
+                    nivel = i.n; prefs.edit().putInt("cand_nivel_$evento", nivel).apply(); refrescar(); menuInd(i)
+                }
+            })
+        }
+
+        fun ajustes() {
+            fun campo(h: String, v: Int) = EditText(this).apply { hint = h; setText(v.toString()); inputType = InputType.TYPE_CLASS_NUMBER; textSize = 18f }
+            val ep = campo("Paneles", cd.p); val en = campo("Niveles", cd.n); val et = campo("Tubos por panel", cd.t)
+            val foto = CheckBox(this).apply { text = "Abrir la cámara al marcar una indicación"; isChecked = prefs.getBoolean("cand_foto", true); textSize = 16f }
+            val col = columna().apply {
+                addView(texto("Paneles", 13f)); addView(ep); addView(texto("Niveles", 13f)); addView(en)
+                addView(texto("Tubos por panel (candados = tubos − 1)", 13f)); addView(et); addView(foto)
+            }
+            mostrar(AlertDialog.Builder(this).setTitle("Ajustes de candados").setView(scroll(col))
+                .setPositiveButton("Guardar") { _, _ ->
+                    val p = ep.text.toString().toIntOrNull(); val n = en.text.toString().toIntOrNull(); val t = et.text.toString().toIntOrNull()
+                    if (p == null || n == null || t == null || p !in 1..200 || n !in 1..50 || t !in 2..200) { aviso("Revisa los valores (paneles 1–200, niveles 1–50, tubos 2–200)"); return@setPositiveButton }
+                    cd.p = p; cd.n = n; cd.t = t
+                    prefs.edit().putBoolean("cand_foto", foto.isChecked).apply()
+                    nivel = nivel.coerceIn(1, n)
+                    val fuera = cd.ind.count { it.n > n || it.p > p || it.c >= t }
+                    if (fuera > 0) aviso("$fuera indicación(es) quedan fuera de la grilla (no se borran)")
+                    guardarC(); vista.actualizar()
+                }.setNegativeButton("Cancelar", null).create())
+        }
+
+        refrescar = {
+            prefs.edit().putInt("cand_nivel_$evento", nivel).apply()
+            vista.cd = cd; vista.nivel = nivel; vista.fotos = fotosCandados(); vista.actualizar()
+            val enNivel = cd.ind.count { it.n == nivel }
+            tituloTv.text = "Candados — Nivel $nivel\n$enNivel indicación(es) · ${cd.ind.size} en total"
+            chips.removeAllViews()
+            for (n in 1..cd.n) {
+                val k = cd.ind.count { it.n == n }
+                chips.addView(TextView(this).apply {
+                    text = if (k > 0) "N$n · $k" else "N$n"; textSize = 16f; typeface = medio; gravity = Gravity.CENTER
+                    setTextColor(if (n == nivel) C.oscuro else if (k > 0) Color.parseColor("#FF9A9A") else Color.WHITE)
+                    background = fondoRedondeado(if (n == nivel) C.acento else fondoBoton, 10)
+                    setPadding(dp(14), dp(10), dp(14), dp(10)); minWidth = dp(56)
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) }
+                    setOnClickListener { nivel = n; vista.sel = null; refrescar() }
+                })
+            }
+            ayuda.text = (if (cd.t <= 16) "Toca el candado con indicación (entre dos tubos). " else "Toca el panel y luego el candado. ") +
+                "Rosado = sin foto · rojo = con foto. Los candados sin indicación no se registran."
+            acciones.removeAllViews()
+            acciones.addView(accionOscura(R.drawable.ic_tabla, "Lista") { lista() })
+            acciones.addView(accionOscura(R.drawable.ic_compartir, "Lámina") { laminaCandados(cd, nivel) })
+            acciones.addView(accionOscura(R.drawable.ic_editar, "Ajustes") { ajustes() })
+        }
+        vista.alTocar = { p, c -> if (c > 0) tocarCandado(p, c) else abrirPanel(p) }
+        refrescar()
+        dlg.show()
+    }
+
+    /** Texto libre con dictado (para "Otro" y la nota de una indicación). */
+    private fun notaCandado(titulo: String, inicial: String, ok: (String) -> Unit) {
+        val et = EditText(this).apply { setText(inicial); setSelection(text.length); textSize = 18f; minLines = 2 }
+        val d = mostrar(AlertDialog.Builder(this).setTitle(titulo).setView(conMargen(et))
+            .setPositiveButton("Guardar") { _, _ -> ok(et.text.toString()) }
+            .setNeutralButton("🎤 Dictar", null)
+            .setNegativeButton("Cancelar", null).create())
+        d.getButton(AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener { dictar(et) }
+    }
+
+    /** Lámina PNG del nivel: grilla con las indicaciones y la lista, en <evento>/Candados/. */
+    private fun laminaCandados(cd: Candados, nivel: Int) {
+        val lista = cd.ind.filter { it.n == nivel }.sortedWith(compareBy<IndCand>({ it.p }, { it.c }))
+        val espera = AlertDialog.Builder(this).setMessage("Generando lámina…").setCancelable(false).show()
+        Thread {
+            val res = runCatching {
+                val fotos = fotosCandados()
+                val w = 1400
+                val u = w / (anchoCand(cd.t) + 20)
+                val cab = 70 * u; val gy = cab
+                val alto = gy + (10 + cd.p * 34) * u + (30 + lista.size * 16 + 20) * u
+                val bmp = Bitmap.createBitmap(w, alto.toInt(), Bitmap.Config.ARGB_8888)
+                val cv = Canvas(bmp); cv.drawColor(Color.WHITE)
+                val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = C.primario; textSize = 18f * u; typeface = Typeface.DEFAULT_BOLD }
+                cv.drawText("Candados — Nivel $nivel", 10 * u, 26 * u, tp)
+                tp.textSize = 11f * u; tp.typeface = Typeface.DEFAULT; tp.color = C.tenue
+                cv.drawText("$evento · ${lista.size} indicación(es) · ${cd.p} paneles × ${cd.t - 1} candados · " +
+                    SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date()), 10 * u, 46 * u, tp)
+                for (p in 1..cd.p) {
+                    val y = gy + (6 + (p - 1) * 34) * u
+                    val marcas = lista.filter { it.p == p }.associate { it.c to ((fotos[rutaCand(nivel, p, it.c)] ?: 0) > 0) }
+                    tp.color = if (marcas.isEmpty()) C.tenue else C.peligro; tp.textSize = 10f * u
+                    cv.drawText("P%02d".format(p), 10 * u, y + 18 * u, tp)
+                    dibujarFilaCand(cv, 40 * u, y, u, 28f, cd.t, marcas, -1)
+                    marcas.keys.forEach { c ->
+                        tp.color = C.peligro; tp.textSize = 7f * u; tp.textAlign = Paint.Align.CENTER
+                        cv.drawText("%d-%d".format(c, c + 1), (40 + (c - 1) * 20 + 16) * u, y + 36 * u, tp)
+                        tp.textAlign = Paint.Align.LEFT
+                    }
+                }
+                var y = gy + (10 + cd.p * 34 + 24) * u
+                tp.color = C.primario; tp.textSize = 12f * u; tp.typeface = Typeface.DEFAULT_BOLD
+                cv.drawText(if (lista.isEmpty()) "Sin indicaciones en este nivel" else "Indicaciones", 10 * u, y, tp)
+                tp.typeface = Typeface.DEFAULT; tp.color = C.tinta; tp.textSize = 11f * u
+                lista.forEach { i ->
+                    y += 16 * u
+                    cv.drawText("${textoCand(i.p, i.c)}  —  ${i.k}" + (if (i.o.isNotBlank()) "  ·  ${i.o}" else "") +
+                        "  (${fotos[rutaCand(i.n, i.p, i.c)] ?: 0} foto/s)", 10 * u, y, tp)
+                }
+                val nombre = "Candados Nivel $nivel.png"
+                val dest = buscarArchivo(rutaCandados(), nombre) ?: contentResolver.insert(coleccion, ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, nombre)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, rutaCandados())
+                }) ?: error("sin archivo")
+                contentResolver.openOutputStream(dest, "wt")!!.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                bmp.recycle()
+                dest to nombre
+            }
+            runOnUiThread {
+                runCatching { espera.dismiss() }
+                res.onFailure { aviso("No se pudo generar la lámina: ${it.message}") }
+                res.onSuccess { (uri, nombre) ->
+                    mostrar(AlertDialog.Builder(this).setTitle("Lámina guardada")
+                        .setMessage("${rutaCandados()}$nombre\n\nVa incluida en el ZIP del evento.")
+                        .setPositiveButton("Compartir") { _, _ ->
+                            val i = Intent(Intent.ACTION_SEND).setType("image/png")
+                                .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            runCatching { startActivity(Intent.createChooser(i, "Compartir lámina")) }.onFailure { aviso("No hay app para compartir") }
+                        }
+                        .setNeutralButton("Abrir") { _, _ ->
+                            runCatching { startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "image/png")
+                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }.onFailure { aviso("No hay app para ver imágenes") }
+                        }
+                        .setNegativeButton("Cerrar", null).create())
+                }
+            }
+        }.start()
+    }
+
     // ---------- Croquis ----------
     // Imagen de referencia de una pared (o de una carpeta de una inspección por árbol), por ejemplo la
     // lámina del plan de inspección, con un marcador por singularidad. El marcador muestra una etiqueta
@@ -4891,6 +5269,7 @@ class MainActivity : AppCompatActivity() {
                     "nombre" -> "Foto del nombre" to "Placa o rótulo con el nombre de la carpeta"
                     "planoFoto" -> "Foto del hallazgo" to "Encuadra la marca escrita, ej. Nivel 3 entre 50-51"
                     "croquis" -> "Foto del croquis" to "Encuadra el croquis completo"
+                    "candado" -> tituloFotoCandado to "Encuadra el candado y el código escrito (panel y tubos)"
                     else -> "Foto" to null
                 }
                 val i = Intent(this, CamaraActivity::class.java).putExtra("destino", uri.toString())
@@ -5843,7 +6222,7 @@ class MainActivity : AppCompatActivity() {
         "⌨️" to R.drawable.ic_teclado, "⌨" to R.drawable.ic_teclado, "←" to R.drawable.ic_volver,
         "＋" to R.drawable.ic_agregar, "✕" to R.drawable.ic_cerrar, "✓" to R.drawable.ic_listo,
         "🔥" to R.drawable.ic_caldera, "📅" to R.drawable.ic_evento, "📐" to R.drawable.ic_regla, "📦" to R.drawable.ic_zip,
-        "🌳" to R.drawable.ic_arbol, "🗺" to R.drawable.ic_plano, "🚦" to R.drawable.ic_estado, "☁" to R.drawable.ic_nube)
+        "🌳" to R.drawable.ic_arbol, "🗺" to R.drawable.ic_plano, "🔒" to R.drawable.ic_punto, "🚦" to R.drawable.ic_estado, "☁" to R.drawable.ic_nube)
 
     /** Separa un emoji inicial del texto: (ícono, texto limpio). */
     private fun separarIcono(s: String): Pair<Int?, String> {
